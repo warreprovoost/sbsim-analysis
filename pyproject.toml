@@ -10,6 +10,8 @@ packages = [
 
 [tool.poetry.dependencies]
 python = ">=3.10.12,<3.12"
+
+ # This is locally downloaded, change this for publishing
 smart-control = { path = "../sbsim", develop = true }
 
 tensorflow = "2.15.1"

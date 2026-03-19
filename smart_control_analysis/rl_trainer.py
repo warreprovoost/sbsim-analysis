@@ -24,18 +24,45 @@ class TrainingProgressCallback(BaseCallback):
         self.timesteps = []
         self.current_episode_reward = 0.0
         self.current_episode_length = 0
+        self.debug_step = 0
 
     def _on_step(self) -> bool:
-        # Access Monitor wrapper data
-        infos = self.locals.get("infos", [])
-        if infos and isinstance(infos, list):
-            for info in infos:
-                if "episode" in info:
-                    self.episode_rewards.append(info["episode"]["r"])
-                    self.episode_lengths.append(info["episode"]["l"])
-                    self.timesteps.append(self.model.num_timesteps)
+        self.debug_step += 1
+
+        rewards = self.locals.get("rewards", np.array([]))
+        dones = self.locals.get("dones", np.array([]))
+
+        # Track reward for this step
+        if isinstance(rewards, np.ndarray) and len(rewards) > 0:
+            self.current_episode_reward += float(rewards[0])
+        elif isinstance(rewards, (int, float)):
+            self.current_episode_reward += float(rewards)
+
+        self.current_episode_length += 1
+
+        # Check if episode ended
+        if isinstance(dones, np.ndarray) and len(dones) > 0:
+            if dones[0]:
+                self.episode_rewards.append(self.current_episode_reward)
+                self.episode_lengths.append(self.current_episode_length)
+                self.timesteps.append(self.model.num_timesteps)
+                self.current_episode_reward = 0.0
+                self.current_episode_length = 0
+        elif isinstance(dones, bool) and dones:
+            self.episode_rewards.append(self.current_episode_reward)
+            self.episode_lengths.append(self.current_episode_length)
+            self.timesteps.append(self.model.num_timesteps)
+            self.current_episode_reward = 0.0
+            self.current_episode_length = 0
+
         return True
 
+    def _on_training_end(self) -> None:
+        """Save partial episode data when training ends."""
+        if self.current_episode_length > 0:
+            self.episode_rewards.append(self.current_episode_reward)
+            self.episode_lengths.append(self.current_episode_length)
+            self.timesteps.append(self.model.num_timesteps)
 
 class BuildingRLTrainer:
     """Train multiple RL agents (SAC/TD3/DDPG) on the building environment."""

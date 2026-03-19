@@ -11,6 +11,7 @@ from smart_control.simulator.hvac_floorplan_based import FloorPlanBasedHvac
 from smart_control.simulator.setpoint_schedule import SetpointSchedule
 from smart_control.simulator.tf_simulator import TFSimulator
 from smart_control.simulator.weather_controller import WeatherController
+from smart_control_analysis.custom_sbsim.direct_vav_tf_simulator import DirectVavTFSimulator
 
 
 def building_factory(params: dict):
@@ -121,7 +122,7 @@ def building_factory(params: dict):
         zone_identifier=["room_1"],
     )
 
-    building_sim = TFSimulator(
+    building_sim = DirectVavTFSimulator(
         building=building,
         hvac=hvac,
         weather_controller=weather_controller,

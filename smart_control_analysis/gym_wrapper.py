@@ -136,10 +136,6 @@ class BuildingGymEnv(gym.Env):
         ah_cool_sp = 293.15 + ah_cool_action * 10.0
         # boiler water: [-1,1] -> [318, 338] K (45°C - 65°C)
         boiler_sp = 328.0 + boiler_action * 10.0
-        # VAV dampers: [-1,1] -> [0, 1]
-        vav_dampers = 0.5 + vav_damper_actions * 0.5
-        # VAV reheat valves: [-1,1] -> [0, 1]
-        vav_reheats = 0.5 + vav_reheat_actions * 0.5
 
         # get current timestamp
         action_timestamp = self.sim.current_timestamp
@@ -155,11 +151,19 @@ class BuildingGymEnv(gym.Env):
         # apply boiler setpoint
         self.boiler.set_action("supply_water_setpoint", float(boiler_sp), action_timestamp)
 
-        # apply VAV damper and reheat commands per zone
+        # map [-1,1] -> [0,1], then enforce min damper > 0 to avoid Vav.output() assert
+        min_damper = 0.01
+        damper_cmds = np.clip((vav_damper_actions + 1.0) * 0.5, min_damper, 1.0)
+        reheat_cmds = np.clip((vav_reheat_actions + 1.0) * 0.5, 0.0, 1.0)
+
         for i, zone_id in enumerate(self.zone_ids):
             vav = self.vavs[zone_id]
-            vav.set_action("supply_air_damper_percentage_command", float(vav_dampers[i]), action_timestamp)
-            vav.reheat_valve_setting = float(vav_reheats[i])
+            vav.set_action(
+                "supply_air_damper_percentage_command",
+                float(damper_cmds[i]),
+                action_timestamp,
+            )
+            vav.reheat_valve_setting = float(reheat_cmds[i])
 
         # advance simulator one timestep
         #print(self.sim.hvac.vavs["room_1"].reheat_valve_setting)

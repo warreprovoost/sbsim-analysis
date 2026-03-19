@@ -2,6 +2,7 @@
 poetry.lock
 .ipynb_checkpoints/
 smart_control_analysis/experiment_results/
+notebooks/experiment_results/
 
 # Python
 __pycache__/
