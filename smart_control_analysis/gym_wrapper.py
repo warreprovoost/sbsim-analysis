@@ -43,6 +43,11 @@ class BuildingGymEnv(gym.Env):
         self.comfort_band_k = comfort_band_k
         self.comfort_hours = comfort_hours
 
+        self._last_energy_components = {
+            "blower_rate": float("nan"),
+            "boiler_gas_rate": float("nan"),
+            "pump_rate": float("nan"),
+        }
 
         zone_temps_dict = self.sim.building.get_zone_average_temps()
         self.zone_ids = sorted(zone_temps_dict.keys())  # e.g., ["room_1", "room_2"]
@@ -183,13 +188,19 @@ class BuildingGymEnv(gym.Env):
         truncated = self.step_count >= self.max_steps
 
         info: Dict = {
-            "raw_reward_obj": r_obj,
-            "comfort_penalty": float(comfort_penalty),
-            "energy_rate": float(energy_rate),
-            "reward_total": float(total_reward),
-            "supply_air_sp_C": supply_air_sp - 273.15,
-            "boiler_sp_C": boiler_sp - 273.15,
+            "raw_reward_obj":       r_obj,
+            "comfort_penalty":      float(comfort_penalty),
+            "energy_rate":          float(energy_rate),
+            "blower_rate":          self._last_energy_components["blower_rate"],
+            "ah_conditioning_rate": self._last_energy_components["ah_conditioning_rate"],
+            "boiler_gas_rate":      self._last_energy_components["boiler_gas_rate"],
+            "pump_rate_raw":        self._last_energy_components["pump_rate_raw"],
+            "reheat_coil_rate":     self._last_energy_components["reheat_coil_rate"],  # new
+            "reward_total":         float(total_reward),
+            "supply_air_sp_C":      supply_air_sp - 273.15,
+            "boiler_sp_C":          boiler_sp - 273.15,
         }
+
         return obs, float(total_reward), terminated, truncated, info
 
 
@@ -216,16 +227,60 @@ class BuildingGymEnv(gym.Env):
                 t = float(ziv.zone_air_temperature)
                 total_comfort_penalty += max(comfort_low_k - t, 0.0) + max(t - comfort_high_k, 0.0)
 
-        total_energy_rate = (
-            sum(float(ainfo.blower_electrical_energy_rate)
-                for ainfo in r.air_handler_reward_infos.values()) +
-            sum(float(binfo.natural_gas_heating_energy_rate) +
-                float(binfo.pump_electrical_energy_rate)
-                for binfo in r.boiler_reward_infos.values())
+        blower_rate = sum(
+            float(ainfo.blower_electrical_energy_rate)
+            for ainfo in r.air_handler_reward_infos.values()
         )
-        # FOR NOW ENERGY IS DISREGARDED
-        # total_energy_rate = 0.0
+        ah_conditioning_rate = sum(
+            abs(float(ainfo.air_conditioning_electrical_energy_rate))
+            for ainfo in r.air_handler_reward_infos.values()
+        )
+        boiler_gas_rate = sum(
+            float(binfo.natural_gas_heating_energy_rate)
+            for binfo in r.boiler_reward_infos.values()
+        )
+        pump_rate = sum(
+            float(binfo.pump_electrical_energy_rate)
+            for binfo in r.boiler_reward_infos.values()
+        )
+
+        # get supply air temp from AH after sim step
+        recirculation_temp = float(
+            np.mean(list(self.sim.building.get_zone_average_temps().values()))
+        )
+
+        ambient_temp = float(
+            self.air_handler.get_observation(
+                "outside_air_temperature_sensor",
+                self.sim.current_timestamp,
+            )
+        )
+
+        supply_air_temp = float(
+            self.air_handler.get_supply_air_temp(recirculation_temp, ambient_temp)
+        )
+
+        reheat_coil_rate = sum(
+            vav.compute_reheat_energy_rate(
+                supply_air_temp,
+                float(self.boiler.supply_water_setpoint),
+            )
+            for vav in self.vavs.values()
+        )
+
+        self._last_energy_components = {
+            "blower_rate":        float(blower_rate),
+            "ah_conditioning_rate": float(ah_conditioning_rate),
+            "boiler_gas_rate":    float(boiler_gas_rate),
+            "pump_rate_raw":      float(pump_rate),
+            "reheat_coil_rate":   float(reheat_coil_rate),
+        }
+
+        # pump excluded (unrealistic scale), reheat_coil_rate added
+        total_energy_rate = blower_rate + ah_conditioning_rate + boiler_gas_rate + reheat_coil_rate
         return float(total_comfort_penalty), float(total_energy_rate)
+
+
 
 
     def _combine_reward_terms(self, comfort_penalty: float, energy_rate: float) -> float:
