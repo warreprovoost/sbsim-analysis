@@ -13,31 +13,35 @@ from smart_control.simulator.thermostat import Thermostat
 
 class BuildingGymEnv(gym.Env):
     """
-    Gymnasium wrapper that uses device.set_action(...) for controls.
-
-    Architecture:
-    - 1 air_handler: supply_air_heating_temperature_setpoint, supply_air_cooling_temperature_setpoint
-    - 1 boiler: supply_water_setpoint
-    - n_zones VAVs (sim.hvac.vavs dict): each has supply_air_damper_percentage_command and reheat_valve_setting
-
-    Action space:
-    - [0]: air_handler heating setpoint [-1,1] -> [273.15, 313.15] K (0°C - 40°C)
-    - [1]: air_handler cooling setpoint [-1,1] -> [283.15, 303.15] K (10°C - 30°C)
-    - [2]: boiler water setpoint [-1,1] -> [318, 338] K (45°C - 65°C)
-    - [3:3+n_zones]: per-zone VAV damper percentage [-1,1] -> [0, 1]
-    - [3+n_zones:3+2*n_zones]: per-zone VAV reheat valve [-1,1] -> [0, 1]
-    Total action dim: 3 + 2*n_zones
+    Action space (reduced):
+    - [0]: supply_air_temp_setpoint [-1,1] -> [285.15, 305.15] K (12°C - 32°C)
+    - [1]: boiler water setpoint [-1,1] -> [318, 338] K (45°C - 65°C)
+    - [2:2+n_zones]: per-zone VAV damper percentage [-1,1] -> [0.01, 1]
+    - [2+n_zones:2+2*n_zones]: per-zone VAV reheat valve [-1,1] -> [0, 1]
+    Total action dim: 2 + 2*n_zones
     """
 
     metadata = {"render_modes": ["human"]}
 
-    def __init__(self, sim: Any, mutable_schedule: MutableSetpointSchedule = None, time_zone: str = "Europe/Brussels", seed: Optional[int] = None,  max_steps: Optional[int] = None):
+    def __init__(
+        self,
+        sim: Any,
+        mutable_schedule: MutableSetpointSchedule = None,
+        time_zone: str = "Europe/Brussels",
+        seed: Optional[int] = None,
+        max_steps: Optional[int] = None,
+        comfort_band_k: Tuple[float, float] = (294.15, 295.15),  # 21C to 22C
+        comfort_hours: Tuple[float, float] = (8.0, 18.0),
+    ):
         super().__init__()
         self.sim = sim
         self.mutable_schedule = mutable_schedule
         self.time_zone = time_zone
         # Default to steps for 24h
         self.max_steps = max_steps if max_steps is not None else (24 * 60 * 60) // self.sim.time_step_sec
+
+        self.comfort_band_k = comfort_band_k
+        self.comfort_hours = comfort_hours
 
 
         zone_temps_dict = self.sim.building.get_zone_average_temps()
@@ -60,7 +64,12 @@ class BuildingGymEnv(gym.Env):
         ]
 
         # action: [ah_heat, ah_cool, boiler, vav_1_damper, vav_2_damper, ..., vav_1_reheat, vav_2_reheat, ...]
-        self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(3 + 2 * self.n_zones,), dtype=np.float32)
+        # 2 shared + 2 per zone
+        self.action_space = spaces.Box(
+            low=-1.0, high=1.0,
+            shape=(2 + 2 * self.n_zones,),
+            dtype=np.float32,
+        )
         self.observation_space = spaces.Box(
             low=-1e3, high=1e4,
             shape=(self.n_zones * 2 + 1,),  # temps + occupancies + time
@@ -94,64 +103,61 @@ class BuildingGymEnv(gym.Env):
     def reset(self, *, seed: Optional[int] = None, options: Optional[Dict] = None) -> Tuple[np.ndarray, Dict]:
         if seed is not None:
             np.random.seed(seed)
-
         self.sim.reset()
-        if self.mutable_schedule is not None:
-            self.mutable_schedule.set_temp_window((293, 294))
 
-        # recreate occupancies for fresh randomness each episode
+        # deterministic occupancies when seed is given
+        base_seed = 0 if seed is None else int(seed)
         self.occupancies = [
             RandomizedArrivalDepartureOccupancy(
-                zone_assignment=10, # this is the number of occupants
+                zone_assignment=10,
                 earliest_expected_arrival_hour=7,
                 latest_expected_arrival_hour=9,
                 earliest_expected_departure_hour=16,
                 latest_expected_departure_hour=18,
                 time_step_sec=self.sim.time_step_sec,
-                seed=None,
+                seed=base_seed + i,
                 time_zone=self.time_zone,
             )
             for i in range(self.n_zones)
         ]
-
         self.step_count = 0
-        obs = self._get_obs()
-        return obs, {}
+        return self._get_obs(), {}
 
     def step(self, action: np.ndarray):
         action = np.asarray(action, dtype=np.float32).ravel()
-        assert action.size == 3 + 2 * self.n_zones
+        assert action.size == 2 + 2 * self.n_zones
 
-        # split action components
-        ah_heat_action = action[0]
-        ah_cool_action = action[1]
-        boiler_action = action[2]
-        vav_damper_actions = action[3:3+self.n_zones]
-        vav_reheat_actions = action[3+self.n_zones:3+2*self.n_zones]
+        supply_air_action = action[0]
+        boiler_action     = action[1]
+        vav_damper_actions = action[2:2+self.n_zones]
+        vav_reheat_actions = action[2+self.n_zones:2+2*self.n_zones]
 
-        # map actions to setpoints
-        # air handler heating: [-1,1] -> [273.15, 313.15] K (0°C - 40°C)
-        ah_heat_sp = 293.15 + ah_heat_action * 20.0  # Center at 20°C, range ±20K
-        # air handler cooling: [-1,1] -> [283.15, 303.15] K (10°C - 30°C)
-        ah_cool_sp = 293.15 + ah_cool_action * 10.0
-        # boiler water: [-1,1] -> [318, 338] K (45°C - 65°C)
-        boiler_sp = 328.0 + boiler_action * 10.0
+        # supply air temp: [-1,1] -> [285.15, 305.15] K  (12°C to 32°C)
+        supply_air_sp = 295.15 + supply_air_action * 10.0
 
-        # get current timestamp
+        ah_heat_sp = supply_air_sp - 0.5
+        ah_cool_sp = supply_air_sp + 0.5
+
+        # boiler: [-1,1] -> [318.15, 338.15] K (45°C to 65°C)
+        boiler_sp = 328.15 + boiler_action * 10.0
+
         action_timestamp = self.sim.current_timestamp
 
-        # This controls the Thermostat indirectly.
         if self.mutable_schedule is not None:
-          self.mutable_schedule.set_temp_window((ah_heat_sp - 0.1, ah_heat_sp + 0.1))
+            self.mutable_schedule.set_temp_window((ah_heat_sp - 0.1, ah_heat_sp + 0.1))
 
-        # apply air handler setpoints
-        self.air_handler.set_action("supply_air_heating_temperature_setpoint", float(ah_heat_sp), action_timestamp)
-        self.air_handler.set_action("supply_air_cooling_temperature_setpoint", float(ah_cool_sp), action_timestamp)
-
-        # apply boiler setpoint
+        self.air_handler.set_action(
+            "supply_air_heating_temperature_setpoint",
+            float(ah_heat_sp),
+            action_timestamp,
+        )
+        self.air_handler.set_action(
+            "supply_air_cooling_temperature_setpoint",
+            float(ah_cool_sp),
+            action_timestamp,
+        )
         self.boiler.set_action("supply_water_setpoint", float(boiler_sp), action_timestamp)
 
-        # map [-1,1] -> [0,1], then enforce min damper > 0 to avoid Vav.output() assert
         min_damper = 0.01
         damper_cmds = np.clip((vav_damper_actions + 1.0) * 0.5, min_damper, 1.0)
         reheat_cmds = np.clip((vav_reheat_actions + 1.0) * 0.5, 0.0, 1.0)
@@ -165,50 +171,70 @@ class BuildingGymEnv(gym.Env):
             )
             vav.reheat_valve_setting = float(reheat_cmds[i])
 
-        # advance simulator one timestep
-        #print(self.sim.hvac.vavs["room_1"].reheat_valve_setting)
         self.sim.step_sim()
-        #print(self.sim.hvac.vavs["room_1"].reheat_valve_setting)
-
         obs = self._get_obs()
 
-        # call reward_info once per occupancy and sum
-        total_reward = 0.0
-        raw_reward_objs = []
-        for occ in self.occupancies:
-            r_obj = self.sim.reward_info(occ)
-            raw_reward_objs.append(r_obj)
-            total_reward += self._reduce_reward_obj_to_scalar(r_obj)
-
+        r_obj = self.sim.reward_info(self.occupancies[0])
+        comfort_penalty, energy_rate = self._reward_terms_from_reward_obj(r_obj)
+        total_reward = self._combine_reward_terms(comfort_penalty, energy_rate)
 
         self.step_count += 1
-        terminated = False  # What could a termination condition be?
-        truncated = self.step_count >= self.max_steps  # Truncate after max_steps
+        terminated = False
+        truncated = self.step_count >= self.max_steps
 
-        info: Dict = {"raw_reward_objs": raw_reward_objs}
+        info: Dict = {
+            "raw_reward_obj": r_obj,
+            "comfort_penalty": float(comfort_penalty),
+            "energy_rate": float(energy_rate),
+            "reward_total": float(total_reward),
+            "supply_air_sp_C": supply_air_sp - 273.15,
+            "boiler_sp_C": boiler_sp - 273.15,
+        }
         return obs, float(total_reward), terminated, truncated, info
 
+
+    def _is_comfort_active(self) -> bool:
+            """Return True only during configured working hours."""
+            ts = self.sim.current_timestamp
+            hour_of_day = ts.hour + ts.minute / 60.0 + ts.second / 3600.0
+
+            start_hour, end_hour = self.comfort_hours
+
+            # Normal same-day window, e.g. 8 -> 18
+            if start_hour <= end_hour:
+                return start_hour <= hour_of_day < end_hour
+
+            # Overnight window, e.g. 22 -> 6
+            return hour_of_day >= start_hour or hour_of_day < end_hour
+
+    def _reward_terms_from_reward_obj(self, r: Any) -> Tuple[float, float]:
+        comfort_low_k, comfort_high_k = self.comfort_band_k
+
+        total_comfort_penalty = 0.0
+        if self._is_comfort_active():
+            for ziv in r.zone_reward_infos.values():
+                t = float(ziv.zone_air_temperature)
+                total_comfort_penalty += max(comfort_low_k - t, 0.0) + max(t - comfort_high_k, 0.0)
+
+        total_energy_rate = (
+            sum(float(ainfo.blower_electrical_energy_rate)
+                for ainfo in r.air_handler_reward_infos.values()) +
+            sum(float(binfo.natural_gas_heating_energy_rate) +
+                float(binfo.pump_electrical_energy_rate)
+                for binfo in r.boiler_reward_infos.values())
+        )
+        # FOR NOW ENERGY IS DISREGARDED
+        # total_energy_rate = 0.0
+        return float(total_comfort_penalty), float(total_energy_rate)
+
+
+    def _combine_reward_terms(self, comfort_penalty: float, energy_rate: float) -> float:
+      energy_weight = 1e-4
+      return float(-(comfort_penalty + energy_weight * energy_rate))
+
     def _reduce_reward_obj_to_scalar(self, r: Any) -> float:
-      total_comfort_penalty = sum(
-          abs(float(ziv.zone_air_temperature) -
-              0.5 * (float(ziv.heating_setpoint_temperature) +
-                    float(ziv.cooling_setpoint_temperature)))
-          for ziv in r.zone_reward_infos.values()
-      )
-
-      total_energy_rate = (
-          sum(float(ainfo.blower_electrical_energy_rate)
-              for ainfo in r.air_handler_reward_infos.values()) +
-          sum(float(binfo.natural_gas_heating_energy_rate) +
-              float(binfo.pump_electrical_energy_rate)
-              for binfo in r.boiler_reward_infos.values())
-      )
-
-      # Normalize: comfort in K, energy in W
-      energy_weight = 1e-4  # Adjust based on your scaling preferences
-      reward = -(total_comfort_penalty + energy_weight * total_energy_rate)
-
-      return float(reward)
+      comfort_penalty, energy_rate = self._reward_terms_from_reward_obj(r)
+      return self._combine_reward_terms(comfort_penalty, energy_rate)
 
     def render(self, mode="human"):
         self.sim.get_video()

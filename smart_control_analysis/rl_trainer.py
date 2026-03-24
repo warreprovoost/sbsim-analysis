@@ -15,54 +15,29 @@ from tqdm import tqdm
 from smart_control_analysis.building_factory import building_factory, get_base_params
 
 class TrainingProgressCallback(BaseCallback):
-    """Callback to track training progress with proper logging."""
-
     def __init__(self, verbose: int = 0):
-        super().__init__(verbose)
-        self.episode_rewards = []
-        self.episode_lengths = []
-        self.timesteps = []
-        self.current_episode_reward = 0.0
-        self.current_episode_length = 0
-        self.debug_step = 0
+            super().__init__(verbose)
+            self.episode_rewards = []
+            self.episode_lengths = []
+            self.timesteps = []
+            self.energy_rates = []
+            self.comfort_penalties = []
 
     def _on_step(self) -> bool:
-        self.debug_step += 1
+        infos = self.locals.get("infos", [])
+        for info in infos:
+            if "energy_rate" in info:
+                self.energy_rates.append(float(info["energy_rate"]))
+            if "comfort_penalty" in info:
+                self.comfort_penalties.append(float(info["comfort_penalty"]))
 
-        rewards = self.locals.get("rewards", np.array([]))
-        dones = self.locals.get("dones", np.array([]))
-
-        # Track reward for this step
-        if isinstance(rewards, np.ndarray) and len(rewards) > 0:
-            self.current_episode_reward += float(rewards[0])
-        elif isinstance(rewards, (int, float)):
-            self.current_episode_reward += float(rewards)
-
-        self.current_episode_length += 1
-
-        # Check if episode ended
-        if isinstance(dones, np.ndarray) and len(dones) > 0:
-            if dones[0]:
-                self.episode_rewards.append(self.current_episode_reward)
-                self.episode_lengths.append(self.current_episode_length)
-                self.timesteps.append(self.model.num_timesteps)
-                self.current_episode_reward = 0.0
-                self.current_episode_length = 0
-        elif isinstance(dones, bool) and dones:
-            self.episode_rewards.append(self.current_episode_reward)
-            self.episode_lengths.append(self.current_episode_length)
-            self.timesteps.append(self.model.num_timesteps)
-            self.current_episode_reward = 0.0
-            self.current_episode_length = 0
-
+            # record finished episodes from Monitor/VecMonitor
+            if "episode" in info:
+                ep = info["episode"]
+                self.episode_rewards.append(float(ep.get("r", 0.0)))
+                self.episode_lengths.append(int(ep.get("l", 0)))
+                self.timesteps.append(int(self.model.num_timesteps))
         return True
-
-    def _on_training_end(self) -> None:
-        """Save partial episode data when training ends."""
-        if self.current_episode_length > 0:
-            self.episode_rewards.append(self.current_episode_reward)
-            self.episode_lengths.append(self.current_episode_length)
-            self.timesteps.append(self.model.num_timesteps)
 
 class BuildingRLTrainer:
     """Train multiple RL agents (SAC/TD3/DDPG) on the building environment."""
@@ -236,38 +211,65 @@ class BuildingRLTrainer:
             "episode_lengths": np.array(episode_lengths),
         }
 
-    def plot_training_progress(self, figsize: Tuple[int, int] = (14, 6)) -> plt.Figure:
-        """Plot training progress from callback."""
-        if self.callback is None or not self.callback.episode_rewards:
-            raise ValueError("No training data available. Train the model first.")
+    def plot_training_progress(
+            self,
+            figsize: Tuple[int, int] = (10, 4),
+            show_episode_length: bool = False,
+        ) -> plt.Figure:
+            """Plot training progress from callback."""
+            if self.callback is None or not self.callback.episode_rewards:
+                raise ValueError("No training data available. Train the model first.")
 
-        fig, axes = plt.subplots(1, 2, figsize=figsize)
+            if not show_episode_length:
+                fig, ax = plt.subplots(1, 1, figsize=figsize)
+                ax.plot(self.callback.episode_rewards, alpha=0.7, linewidth=1, label="Raw")
+                ax.set_xlabel("Episode", fontsize=12)
+                ax.set_ylabel("Episode Reward", fontsize=12)
+                ax.set_title(
+                    f"{self.algo_name.upper()}: Episode Rewards",
+                    fontsize=14,
+                    fontweight="bold",
+                )
+                ax.grid(True, alpha=0.3)
 
-        # Episode rewards
-        axes[0].plot(self.callback.episode_rewards, alpha=0.7, linewidth=1, label="Raw")
-        axes[0].set_xlabel("Episode", fontsize=12)
-        axes[0].set_ylabel("Episode Reward", fontsize=12)
-        axes[0].set_title(f"{self.algo_name.upper()}: Episode Rewards", fontsize=14, fontweight="bold")
-        axes[0].grid(True, alpha=0.3)
+                if len(self.callback.episode_rewards) > 10:
+                    window = max(1, len(self.callback.episode_rewards) // 20)
+                    smoothed = np.convolve(
+                        self.callback.episode_rewards,
+                        np.ones(window) / window,
+                        mode="valid",
+                    )
+                    ax.plot(smoothed, color="red", linewidth=2, label="Moving Avg")
+                    ax.legend()
 
-        # Smoothed rewards (moving average)
-        if len(self.callback.episode_rewards) > 10:
-            window = max(1, len(self.callback.episode_rewards) // 20)
-            smoothed = np.convolve(
-                self.callback.episode_rewards, np.ones(window) / window, mode="valid"
-            )
-            axes[0].plot(smoothed, color="red", linewidth=2, label="Moving Avg")
-            axes[0].legend()
+                fig.tight_layout()
+                return fig
 
-        # Episode lengths
-        axes[1].plot(self.callback.episode_lengths, alpha=0.7, linewidth=1)
-        axes[1].set_xlabel("Episode", fontsize=12)
-        axes[1].set_ylabel("Episode Length (steps)", fontsize=12)
-        axes[1].set_title(f"{self.algo_name.upper()}: Episode Lengths", fontsize=14, fontweight="bold")
-        axes[1].grid(True, alpha=0.3)
+            # Optional old behavior
+            fig, axes = plt.subplots(1, 2, figsize=figsize)
+            axes[0].plot(self.callback.episode_rewards, alpha=0.7, linewidth=1, label="Raw")
+            axes[0].set_xlabel("Episode", fontsize=12)
+            axes[0].set_ylabel("Episode Reward", fontsize=12)
+            axes[0].set_title(f"{self.algo_name.upper()}: Episode Rewards", fontsize=14, fontweight="bold")
+            axes[0].grid(True, alpha=0.3)
 
-        fig.tight_layout()
-        return fig
+            if len(self.callback.episode_rewards) > 10:
+                window = max(1, len(self.callback.episode_rewards) // 20)
+                smoothed = np.convolve(
+                    self.callback.episode_rewards, np.ones(window) / window, mode="valid"
+                )
+                axes[0].plot(smoothed, color="red", linewidth=2, label="Moving Avg")
+                axes[0].legend()
+
+            axes[1].plot(self.callback.episode_lengths, alpha=0.7, linewidth=1)
+            axes[1].set_xlabel("Episode", fontsize=12)
+            axes[1].set_ylabel("Episode Length (steps)", fontsize=12)
+            axes[1].set_title(f"{self.algo_name.upper()}: Episode Lengths", fontsize=14, fontweight="bold")
+            axes[1].grid(True, alpha=0.3)
+
+            fig.tight_layout()
+            return fig
+
 
     def save_results(self, output_dir: str):
         """Save training results to CSV for later analysis."""

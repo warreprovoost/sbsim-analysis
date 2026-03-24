@@ -8,11 +8,20 @@ packages = [
   { include = "smart_control_analysis" }
 ]
 
+[[tool.poetry.source]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+priority = "explicit"
+
 [tool.poetry.dependencies]
 python = ">=3.10.12,<3.12"
 
  # This is locally downloaded, change this for publishing
 smart-control = { path = "../sbsim", develop = true }
+
+torch = { version = "2.10.0+cu128", source = "pytorch-cu128" }
+torchvision = { version = "0.25.0+cu128", source = "pytorch-cu128" }
+torchaudio = { version = "2.10.0+cu128", source = "pytorch-cu128" }
 
 tensorflow = "2.15.1"
 gymnasium = "^0.29.1"

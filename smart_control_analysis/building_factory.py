@@ -9,7 +9,6 @@ from smart_control.simulator.building import FloorPlanBasedBuilding
 from smart_control.simulator.building import MaterialProperties
 from smart_control.simulator.hvac_floorplan_based import FloorPlanBasedHvac
 from smart_control.simulator.setpoint_schedule import SetpointSchedule
-from smart_control.simulator.tf_simulator import TFSimulator
 from smart_control.simulator.weather_controller import WeatherController
 from smart_control_analysis.custom_sbsim.direct_vav_tf_simulator import DirectVavTFSimulator
 
@@ -43,7 +42,7 @@ def building_factory(params: dict):
         zone_map[1:-1, 1:-1] = 0
         return floorplan, zone_map
 
-    floor_plan, zone_map = single_room_floorplan(room_width=100, room_height=100)
+    floor_plan, zone_map = single_room_floorplan(room_width=10, room_height=10)
 
     # Material properties from params
     inside_air = MaterialProperties(
@@ -127,9 +126,9 @@ def building_factory(params: dict):
         hvac=hvac,
         weather_controller=weather_controller,
         time_step_sec=1500,
-        convergence_threshold=0.01,
-        iteration_limit=100,
-        iteration_warning=80,
+        convergence_threshold=0.5,
+        iteration_limit=48,
+        iteration_warning=35,
         start_timestamp=pd.Timestamp("2025-12-15 08:00:00"),
     )
 
