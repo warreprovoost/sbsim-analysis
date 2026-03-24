@@ -144,7 +144,7 @@ def get_base_params() -> dict:
         "outdoor_high_temp": 20,
 
         # Boiler
-        "boiler_setpoint_celsius": 55,
+        "boiler_setpoint_celsius": 45,
         "pump_head": 60000,
         "pump_efficiency": 1.0,
 

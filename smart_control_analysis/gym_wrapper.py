@@ -276,8 +276,8 @@ class BuildingGymEnv(gym.Env):
             "reheat_coil_rate":   float(reheat_coil_rate),
         }
 
-        # pump excluded (unrealistic scale), reheat_coil_rate added
-        total_energy_rate = blower_rate + ah_conditioning_rate + boiler_gas_rate + reheat_coil_rate
+        # pump excluded (unrealistic scale)
+        total_energy_rate = blower_rate + ah_conditioning_rate + boiler_gas_rate
         return float(total_comfort_penalty), float(total_energy_rate)
 
 
