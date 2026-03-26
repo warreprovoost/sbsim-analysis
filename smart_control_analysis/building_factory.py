@@ -75,11 +75,11 @@ def building_factory(
     )
 
     # Suppress known simulator warning from building_utils.py (UserWarning)
-    #warnings.filterwarnings(
-     #   "ignore",
-      #  category=UserWarning,
-       # module=r"smart_control\.simulator\.building_utils",
-    #)
+    warnings.filterwarnings(
+        "ignore",
+        category=UserWarning,
+        module=r"smart_control\.simulator\.building_utils",
+    )
     # Building with params
     building = FloorPlanBasedBuilding(
         cv_size_cm=params.get("cv_size_cm", 100.0),
@@ -165,9 +165,13 @@ def building_factory(
 
     env = BuildingGymEnv(
         sim=building_sim,
-        time_zone=sim_tz,           # keep env consistent
+        time_zone=sim_tz,
         occupancy_model=occupancy_model,
-        )
+        comfort_band_k=params.get("comfort_band_k", (294.15, 295.15)),
+        working_hours=params.get("working_hours", (8.0, 18.0)),
+        max_steps=params.get("max_steps", None),
+        occupancy_per_zone=params.get("occupancy_per_zone", 10.0),
+    )
     return building_sim, env
 
 
@@ -176,15 +180,17 @@ def get_base_params() -> dict:
     return {
         # Sim
         "time_step_sec": 300,
+        "max_steps": int(7 * 24 * 3600 / 300),
+
 
         # Weather
         "outdoor_low_temp": -5,
         "outdoor_high_temp": 5,
         "convection_coefficient": 100.0,    # stronger outside exchange
-        "start_timestamp": "2024-01-15 06:00:00",
+        "start_timestamp": "2024-01-16 06:00:00",
         "time_zone": "America/Los_Angeles",
         "weather_source": "replay",
-        "weather_csv_path": "/user/gent/453/vsc45342/thesis/weather_data/2024.csv",
+        "weather_csv_path": "~/thesis/weather_data/2024.csv",
 
 
         # Boiler

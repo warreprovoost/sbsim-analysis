@@ -11,20 +11,14 @@ from smart_control.simulator.randomized_arrival_departure_occupancy import Rando
 from smart_control.simulator.step_function_occupancy import StepFunctionOccupancy
 
 
-
-class _NaiveTimeOccupancyAdapter:
-    """Wrap occupancy model to force tz-naive timestamps."""
-    def __init__(self, base_occ: Any):
-        self._base_occ = base_occ
-
-    def average_zone_occupancy(self, zone_id, start_time, end_time):
-        s = pd.Timestamp(start_time)
-        e = pd.Timestamp(end_time)
-        if s.tzinfo is not None:
-            s = s.tz_localize(None)
-        if e.tzinfo is not None:
-            e = e.tz_localize(None)
-        return self._base_occ.average_zone_occupancy(zone_id, s, e)
+class _AlwaysZeroOccupancy:
+    """
+    Passed to sim.reward_info() purely to get energy data from r_obj.
+    Comfort penalty is computed separately in _reward_terms_from_reward_obj
+    via _zone_occupancies_now() which correctly handles tz-naive local timestamps.
+    """
+    def average_zone_occupancy(self, zone_id: str, start_time: Any, end_time: Any) -> float:
+        return 0.0
 
 
 class BuildingGymEnv(gym.Env):
@@ -94,12 +88,15 @@ class BuildingGymEnv(gym.Env):
         self.vavs = self.sim.hvac.vavs  # dict: zone_id -> VAV object
 
     def _occupancy_window_naive(self) -> Tuple[pd.Timestamp, pd.Timestamp]:
-        """Return [start, end] as tz-naive timestamps for occupancy models."""
+        """Return [start, end] as tz-naive LOCAL timestamps for occupancy models."""
         start = self.sim.current_timestamp
         end = start + pd.to_timedelta(self.sim.time_step_sec, unit="s")
 
         if isinstance(start, pd.Timestamp) and start.tzinfo is not None:
-            return start.tz_localize(None), end.tz_localize(None)
+            # FIX: tz_convert first to get correct local time, THEN strip tz
+            start = start.tz_convert(self.time_zone).tz_localize(None)
+            end = end.tz_convert(self.time_zone).tz_localize(None)
+
         return start, end
 
     def _get_obs(self) -> np.ndarray:
@@ -205,11 +202,10 @@ class BuildingGymEnv(gym.Env):
         self.sim.step_sim()
         obs = self._get_obs()
 
-        occ_for_reward = self.occupancies[0]
-        if self.occupancy_model == "step":
-            occ_for_reward = _NaiveTimeOccupancyAdapter(occ_for_reward)
-
-        r_obj = self.sim.reward_info(occ_for_reward)
+        # Use _AlwaysZeroOccupancy so sim.reward_info() never calls StepFunctionOccupancy
+        # with tz-aware timestamps (which would crash or give wrong results).
+        # Comfort penalty is computed from _zone_occupancies_now() in _reward_terms_from_reward_obj.
+        r_obj = self.sim.reward_info(_AlwaysZeroOccupancy())
         comfort_penalty, energy_rate = self._reward_terms_from_reward_obj(r_obj)
         total_reward = self._combine_reward_terms(comfort_penalty, energy_rate)
 
@@ -232,21 +228,6 @@ class BuildingGymEnv(gym.Env):
         }
 
         return obs, float(total_reward), terminated, truncated, info
-
-
-    def _is_comfort_active(self) -> bool:
-            """Return True only during configured working hours."""
-            ts = self.sim.current_timestamp
-            hour_of_day = ts.hour + ts.minute / 60.0 + ts.second / 3600.0
-
-            start_hour, end_hour = self.working_hours
-
-            # Normal same-day window, e.g. 8 -> 18
-            if start_hour <= end_hour:
-                return start_hour <= hour_of_day < end_hour
-
-            # Overnight window, e.g. 22 -> 6
-            return hour_of_day >= start_hour or hour_of_day < end_hour
 
     def _reward_terms_from_reward_obj(self, r: Any) -> Tuple[float, float]:
         comfort_low_k, comfort_high_k = self.comfort_band_k

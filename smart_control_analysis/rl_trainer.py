@@ -1,10 +1,10 @@
 import csv
 import os
-from typing import Any, Callable, Dict, List, Optional, Tuple
-
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from stable_baselines3 import DDPG
 from stable_baselines3 import SAC
 from stable_baselines3 import TD3
@@ -13,33 +13,78 @@ from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.vec_env import SubprocVecEnv
 from tqdm import tqdm
 import itertools
+from smart_control_analysis.baseline_controller import ThermostatBaselineController
+import wandb
 
 from smart_control_analysis.action_wrappers import FixedActionsWrapper
 from smart_control_analysis.building_factory import building_factory, get_base_params
 
 class TrainingProgressCallback(BaseCallback):
-    def __init__(self, verbose: int = 0):
-            super().__init__(verbose)
-            self.episode_rewards = []
-            self.episode_lengths = []
-            self.timesteps = []
-            self.energy_rates = []
-            self.comfort_penalties = []
+    def __init__(
+        self,
+        verbose: int = 0,
+        wandb_run: Optional[Any] = None,
+        log_every_n_steps: int = 100,
+    ):
+        super().__init__(verbose)
+        self.episode_rewards = []
+        self.episode_lengths = []
+        self.timesteps = []
+        self.energy_rates = []
+        self.comfort_penalties = []
+        self.wandb_run = wandb_run
+        self.log_every_n_steps = max(1, int(log_every_n_steps))
+        self._last_logged_step = 0
 
     def _on_step(self) -> bool:
         infos = self.locals.get("infos", [])
+        current_step = int(self.model.num_timesteps)
+
+        # aggregate step metrics
+        step_energy = []
+        step_comfort = []
+
         for info in infos:
             if "energy_rate" in info:
-                self.energy_rates.append(float(info["energy_rate"]))
+                val = float(info["energy_rate"])
+                self.energy_rates.append(val)
+                step_energy.append(val)
             if "comfort_penalty" in info:
-                self.comfort_penalties.append(float(info["comfort_penalty"]))
+                val = float(info["comfort_penalty"])
+                self.comfort_penalties.append(val)
+                step_comfort.append(val)
 
-            # record finished episodes from Monitor/VecMonitor
             if "episode" in info:
                 ep = info["episode"]
-                self.episode_rewards.append(float(ep.get("r", 0.0)))
-                self.episode_lengths.append(int(ep.get("l", 0)))
-                self.timesteps.append(int(self.model.num_timesteps))
+                ep_r = float(ep.get("r", 0.0))
+                ep_l = int(ep.get("l", 0))
+                self.episode_rewards.append(ep_r)
+                self.episode_lengths.append(ep_l)
+                self.timesteps.append(current_step)
+
+                if self.wandb_run is not None:
+                    self.wandb_run.log(
+                        {
+                            "train/episode_reward": ep_r,
+                            "train/episode_length": ep_l,
+                        },
+                        step=current_step,
+                    )
+
+        # periodic step-level logging
+        if (
+            self.wandb_run is not None
+            and (current_step - self._last_logged_step) >= self.log_every_n_steps
+        ):
+            payload = {}
+            if step_energy:
+                payload["train/energy_rate_mean"] = float(np.mean(step_energy))
+            if step_comfort:
+                payload["train/comfort_penalty_mean"] = float(np.mean(step_comfort))
+            if payload:
+                self.wandb_run.log(payload, step=current_step)
+            self._last_logged_step = current_step
+
         return True
 
 class BuildingRLTrainer:
@@ -59,17 +104,21 @@ class BuildingRLTrainer:
         self.callback = None
         self.env = None
         self.algo_name = None
+        self.wandb_run = None
 
     def create_env(
         self,
         params: Optional[Dict[str, Any]] = None,
         fixed_actions: Optional[Dict[int, float]] = None,
         factory_kwargs: Optional[Dict[str, Any]] = None,
+        training_mode: Optional[str] = None,
     ):
         if params is None:
             params = self.base_params.copy()
 
-        kwargs = {**self.default_factory_kwargs, **(factory_kwargs or {})}
+        kwargs = _merge_factory_kwargs(
+            self.default_factory_kwargs, factory_kwargs, training_mode
+        )
         _, env = self.building_factory_fn(params, **kwargs)
 
         if fixed_actions:
@@ -82,24 +131,24 @@ class BuildingRLTrainer:
         params: Optional[Dict[str, Any]] = None,
         fixed_actions: Optional[Dict[int, float]] = None,
         factory_kwargs: Optional[Dict[str, Any]] = None,
+        training_mode: Optional[str] = None,
     ):
         if params is None:
             params = self.base_params.copy()
 
-        kwargs = {**self.default_factory_kwargs, **(factory_kwargs or {})}
+        kwargs = _merge_factory_kwargs(
+            self.default_factory_kwargs, factory_kwargs, training_mode
+        )
 
         def make_env_fn():
-            _, env = self.building_factory_fn(params, **kwargs)
-            if fixed_actions:
-                env = FixedActionsWrapper(env, fixed=fixed_actions)
-            return env
+            return self.create_env(params=params, training_mode=training_mode)
 
-        vec_cls = SubprocVecEnv if n_envs > 1 else None
+        from stable_baselines3.common.env_util import make_vec_env
+        from stable_baselines3.common.vec_env import DummyVecEnv
         return make_vec_env(
             make_env_fn,
             n_envs=n_envs,
-            wrapper_class=None,
-            vec_env_cls=vec_cls,
+            vec_env_cls=DummyVecEnv,
         )
 
 
@@ -115,6 +164,13 @@ class BuildingRLTrainer:
         verbose: int = 1,
         fixed_actions: Optional[Dict[int, float]] = None,
         factory_kwargs: Optional[Dict[str, Any]] = None,
+        training_mode: Optional[str] = None,
+        use_wandb: bool = False,
+        wandb_project: str = "smart-control-rl",
+        wandb_run_name: Optional[str] = None,
+        wandb_tags: Optional[List[str]] = None,
+        wandb_mode: str = "online",
+        wandb_log_every_n_steps: int = 100,
         **algo_kwargs
     ):
         """
@@ -152,6 +208,10 @@ class BuildingRLTrainer:
         if self.algo_name not in ["sac", "td3", "ddpg"]:
             raise ValueError(f"Unsupported algorithm: {algo}. Choose 'sac', 'td3', or 'ddpg'.")
 
+        external_wandb_run = algo_kwargs.pop("wandb_run", None)
+        if external_wandb_run is not None:
+            self.wandb_run = external_wandb_run
+
         algo_kwargs.pop("fixed_actions", None)
         # Create environment
         self.env = self.create_vec_env(
@@ -159,6 +219,7 @@ class BuildingRLTrainer:
             params=params,
             fixed_actions=fixed_actions,
             factory_kwargs=factory_kwargs,
+            training_mode=training_mode,
         )
         # Common parameters
         common_params = {
@@ -191,8 +252,32 @@ class BuildingRLTrainer:
         # Create agent
         self.model = AlgoClass("MlpPolicy", self.env, **common_params)
 
+        if use_wandb:
+            if wandb is None:
+                raise ImportError("wandb is not installed. Install with: pip install wandb")
+            if self.wandb_run is None:
+                self.wandb_run = wandb.init(
+                    project=wandb_project,
+                    name=wandb_run_name,
+                    tags=wandb_tags or [],
+                    mode=wandb_mode,  # "online", "offline", or "disabled"
+                    config={
+                        "algo": self.algo_name,
+                        "total_timesteps": total_timesteps,
+                        "learning_rate": learning_rate,
+                        "buffer_size": buffer_size,
+                        "batch_size": batch_size,
+                        "n_envs": n_envs,
+                        "training_mode": training_mode,
+                    },
+                    reinit=False,
+                )
+
         # Setup callback for progress tracking
-        self.callback = TrainingProgressCallback()
+        self.callback = TrainingProgressCallback(
+            wandb_run=self.wandb_run,
+            log_every_n_steps=wandb_log_every_n_steps,
+        )
 
         # Train
         print(f"Training {self.algo_name.upper()} for {total_timesteps} timesteps...")
@@ -211,7 +296,7 @@ class BuildingRLTrainer:
         params: Optional[Dict[str, Any]] = None,
         fixed_actions: Optional[Dict[int, float]] = None,
         factory_kwargs: Optional[Dict[str, Any]] = None,
-
+        training_mode: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Evaluate trained model on environment.
@@ -230,6 +315,7 @@ class BuildingRLTrainer:
             params=params,
             fixed_actions=fixed_actions,
             factory_kwargs=factory_kwargs,
+            training_mode=training_mode,
         )
         episode_rewards = []
         episode_lengths = []
@@ -438,6 +524,9 @@ class BuildingRLTrainer:
         """Close environments."""
         if self.env is not None:
             self.env.close()
+        if self.wandb_run is not None:
+            self.wandb_run.finish()
+            self.wandb_run = None
 
 
 def compare_algorithms(
@@ -630,23 +719,34 @@ def _available_env_workers() -> int:
         return max(1, len(os.sched_getaffinity(0)))
     return max(1, int(os.cpu_count() or 1))
 
-def run_sac_2024_setup(
+def run_rl_2024_setup(
     weather_csv_path: str,
+    algo: str = "sac",
     total_timesteps: int = 300_000,
     chunk_timesteps: int = 50_000,
-    n_envs: Optional[int] = None,  # ignored if provided; auto-set below
+    n_envs: Optional[int] = None,
     episode_days: int = 7,
     seed: int = 42,
-    output_dir: str = "./results/sac_2024",
+    output_dir: str = "./results/rl_2024",
+    training_mode: str = "full",
+    eval_training_mode: Optional[str] = None,
+    n_eval_episodes: int = 8,
+    wandb_finish: bool = True,
+    train_period_start: str = "2024-01-16",
+    train_period_end: str = "2024-08-01",
+    val_period_start: str = "2024-08-01",
+    val_period_end: str = "2024-10-01",
+    test_period_start: str = "2024-10-01",
+    test_period_end: str = "2024-12-01",
+    **train_kwargs,
 ) -> Dict[str, Any]:
-    """
-    Train on 2024 train split with randomized weekly starts, then evaluate on val/test.
-    Splits:
-      - train: 2024-01-01 .. 2024-10-01
-      - val:   2024-10-01 .. 2024-12-01
-      - test:  2024-12-01 .. 2025-01-01
-    """
     os.makedirs(output_dir, exist_ok=True)
+    algo = algo.lower()
+    if algo not in {"sac", "td3", "ddpg"}:
+        raise ValueError(f"Unsupported algo: {algo}")
+
+    if eval_training_mode is None:
+        eval_training_mode = training_mode
 
     base = get_base_params().copy()
     base["weather_source"] = "replay"
@@ -654,19 +754,19 @@ def run_sac_2024_setup(
     base["time_zone"] = "America/Los_Angeles"
     base["time_step_sec"] = int(base.get("time_step_sec", 300))
 
-    # one episode = one week
     max_steps = int(episode_days * 24 * 3600 / base["time_step_sec"])
     base["max_steps"] = max_steps
 
     trainer = BuildingRLTrainer(
         building_factory_fn=building_factory,
         base_params=base,
-        default_factory_kwargs={"training_mode": "full"},
+        default_factory_kwargs={"training_mode": training_mode},
     )
 
-    # Always use all CPU cores available to this process
-    n_envs = _available_env_workers()
-    print(f"Using n_envs={n_envs} (available CPU workers for this process)")
+    if n_envs is None:
+        n_envs = _available_env_workers()
+        print("caling n_envs", n_envs)
+    print(f"Using n_envs={n_envs}")
 
     rng = np.random.default_rng(seed)
     trained = 0
@@ -674,31 +774,31 @@ def run_sac_2024_setup(
 
     while trained < total_timesteps:
         chunk = min(chunk_timesteps, total_timesteps - trained)
-
         p = base.copy()
         p["start_timestamp"] = _sample_start_in_period(
             rng=rng,
-            start="2024-01-01",
-            end="2024-10-01",
+            start=train_period_start,   # FIX
+            end=train_period_end,       # FIX
             episode_days=episode_days,
             time_zone=base["time_zone"],
         ).isoformat()
 
         if first_chunk:
             trainer.train(
-                algo="sac",
+                algo=algo,
                 total_timesteps=chunk,
                 n_envs=n_envs,
                 params=p,
-                factory_kwargs={"training_mode": "full"},
                 verbose=1,
+                training_mode=training_mode,
+                **train_kwargs,
             )
             first_chunk = False
         else:
             new_env = trainer.create_vec_env(
                 n_envs=n_envs,
                 params=p,
-                factory_kwargs={"training_mode": "full"},
+                training_mode=training_mode,
             )
             if trainer.env is not None:
                 trainer.env.close()
@@ -714,44 +814,60 @@ def run_sac_2024_setup(
         trained += chunk
         print(f"Trained {trained}/{total_timesteps} timesteps")
 
-    # Evaluate on held-out periods
     val_results = _evaluate_period_random_starts(
         trainer=trainer,
         params_template=base,
-        period_start="2024-10-01",
-        period_end="2024-12-01",
-        n_episodes=8,
+        period_start=val_period_start,    # FIX
+        period_end=val_period_end,        # FIX
+        n_episodes=n_eval_episodes,
         episode_days=episode_days,
         deterministic=True,
         seed=seed + 1,
-        factory_kwargs={"training_mode": "full"},
+        factory_kwargs={"training_mode": eval_training_mode},
     )
     test_results = _evaluate_period_random_starts(
         trainer=trainer,
         params_template=base,
-        period_start="2024-12-01",
-        period_end="2025-01-01",
-        n_episodes=8,
+        period_start=test_period_start,   # FIX
+        period_end=test_period_end,       # FIX
+        n_episodes=n_eval_episodes,
         episode_days=episode_days,
         deterministic=True,
         seed=seed + 2,
-        factory_kwargs={"training_mode": "full"},
+        factory_kwargs={"training_mode": eval_training_mode},
     )
 
-    # Save model + logs
-    trainer.save_model(os.path.join(output_dir, "sac_2024_model"))
+    trainer.save_model(os.path.join(output_dir, f"{algo}_2024_model"))
     trainer.save_results(output_dir)
 
     summary = {
+        "algo": algo,
+        "training_mode": training_mode,
+        "eval_training_mode": eval_training_mode,
         "val_mean_reward": val_results["mean_reward"],
         "val_std_reward": val_results["std_reward"],
         "test_mean_reward": test_results["mean_reward"],
         "test_std_reward": test_results["std_reward"],
     }
-    pd.DataFrame([summary]).to_csv(os.path.join(output_dir, "summary.csv"), index=False)
 
-    print("Validation:", summary["val_mean_reward"], "+/-", summary["val_std_reward"])
-    print("Test:", summary["test_mean_reward"], "+/-", summary["test_std_reward"])
+    # log final eval to wandb if enabled
+    if trainer.wandb_run is not None:
+        trainer.wandb_run.log(
+            {
+                "eval/val_mean_reward": summary["val_mean_reward"],
+                "eval/val_std_reward": summary["val_std_reward"],
+                "eval/test_mean_reward": summary["test_mean_reward"],
+                "eval/test_std_reward": summary["test_std_reward"],
+            },
+            step=int(trainer.model.num_timesteps),
+        )
+        if wandb_finish:
+            trainer.wandb_run.finish()
+            trainer.wandb_run = None
+
+    pd.DataFrame([summary]).to_csv(
+        os.path.join(output_dir, f"{algo}_summary.csv"), index=False
+    )
 
     return {
         "trainer": trainer,
@@ -759,3 +875,358 @@ def run_sac_2024_setup(
         "test_results": test_results,
         "summary": summary,
     }
+
+def _merge_factory_kwargs(
+    default_factory_kwargs: Optional[Dict[str, Any]],
+    factory_kwargs: Optional[Dict[str, Any]],
+    training_mode: Optional[str] = None,
+) -> Dict[str, Any]:
+    merged = {**(default_factory_kwargs or {}), **(factory_kwargs or {})}
+    if training_mode is not None:
+        merged["training_mode"] = training_mode
+    return merged
+
+def _extract_action_channels(action: np.ndarray) -> Dict[str, float]:
+    a = np.asarray(action, dtype=np.float32).flatten()
+    return {
+        "action_supply": float(a[0]) if len(a) > 0 else np.nan,
+        "action_boiler": float(a[1]) if len(a) > 1 else np.nan,
+        "action_damper": float(a[2]) if len(a) > 2 else np.nan,
+        "action_reheat_mean": float(np.mean(a[3:])) if len(a) > 3 else np.nan,
+    }
+
+
+def _run_episode_trace(
+    env,
+    policy_fn,
+    policy_name: str,
+    seed: Optional[int] = None,
+) -> Tuple[pd.DataFrame, Dict[str, float], Tuple[float, float]]:
+    obs, _ = env.reset(seed=seed)
+    done = False
+
+    rows = []
+    ep_reward = 0.0
+    ep_comfort = 0.0
+    ep_energy = 0.0
+    ep_len = 0
+
+    comfort_low_c = env.comfort_band_k[0] - 273.15
+    comfort_high_c = env.comfort_band_k[1] - 273.15
+
+    while not done:
+        action = np.asarray(policy_fn(obs, env), dtype=np.float32)
+        obs, reward, terminated, truncated, info = env.step(action)
+
+        ts = env.sim.current_timestamp
+        zone_temps_k = env.sim.building.get_zone_average_temps()
+        room_temp_c = float(np.mean(list(zone_temps_k.values())) - 273.15)
+        outside_temp_c = float(
+            env.air_handler.get_observation("outside_air_temperature_sensor", ts) - 273.15
+        )
+
+        row = {
+            "timestamp": ts,
+            "policy": policy_name,
+            "room_temp_c": room_temp_c,
+            "outside_temp_c": outside_temp_c,
+            "comfort_penalty": float(info.get("comfort_penalty", 0.0)),
+            "energy_rate": float(info.get("energy_rate", 0.0)),
+            "reward": float(reward),
+        }
+        row.update(_extract_action_channels(action))
+        rows.append(row)
+
+        ep_reward += float(reward)
+        ep_comfort += float(info.get("comfort_penalty", 0.0))
+        ep_energy += float(info.get("energy_rate", 0.0))
+        ep_len += 1
+        done = terminated or truncated
+
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df["timestamp"] = pd.to_datetime(df["timestamp"])
+
+    metrics = {
+        "reward": ep_reward,
+        "comfort_penalty": ep_comfort,
+        "energy": ep_energy,
+        "length": ep_len,
+    }
+    return df, metrics, (comfort_low_c, comfort_high_c)
+
+
+def _compare_period_rl_vs_baseline(
+    trainer: BuildingRLTrainer,
+    params_template: Dict[str, Any],
+    period_name: str,
+    period_start: str,
+    period_end: str,
+    output_dir: str,
+    n_episodes: int,
+    episode_days: int,
+    deterministic: bool,
+    seed: int,
+    training_mode: str,
+    n_plot_episodes: int,
+    verbose: bool = True,
+) -> Tuple[pd.DataFrame, Dict[str, float]]:
+    rng = np.random.default_rng(seed)
+    rows = []
+    period_dir = os.path.join(output_dir, period_name)
+    os.makedirs(period_dir, exist_ok=True)
+
+    iterator = tqdm(
+        range(n_episodes),
+        desc=f"[compare:{period_name}]",
+        leave=False,
+        disable=not verbose,
+    )
+
+    for ep in iterator:
+        p = params_template.copy()
+        p["start_timestamp"] = _sample_start_in_period(
+            rng=rng,
+            start=period_start,
+            end=period_end,
+            episode_days=episode_days,
+            time_zone=p["time_zone"],
+        ).isoformat()
+
+        max_steps = int(episode_days * 24 * 3600 / p["time_step_sec"])
+        p["max_steps"] = max_steps
+
+        # RL episode
+        env_rl = trainer.create_env(params=p, training_mode=training_mode)
+        rl_df, rl_m, comfort_band_c = _run_episode_trace(
+            env_rl,
+            lambda obs, env, _det=deterministic: trainer.model.predict(obs, deterministic=_det)[0],
+            "rl",
+            seed=ep,
+        )
+        env_rl.close()
+
+        # Baseline episode (same start, same seed)
+        env_b = trainer.create_env(params=p, training_mode=training_mode)
+        baseline = ThermostatBaselineController(
+            comfort_band_k=env_b.comfort_band_k,
+            working_hours=env_b.working_hours,
+        )
+        b_df, b_m, _ = _run_episode_trace(
+            env_b,
+            lambda obs, env: baseline.get_action(obs, env),
+            "baseline",
+            seed=ep,
+        )
+        env_b.close()
+
+        # save traces
+        rl_df.to_csv(os.path.join(period_dir, f"episode_{ep:02d}_rl_trace.csv"), index=False)
+        b_df.to_csv(os.path.join(period_dir, f"episode_{ep:02d}_baseline_trace.csv"), index=False)
+
+        if ep < n_plot_episodes:
+            _plot_episode_trace_4panel(
+                rl_df, comfort_band_c,
+                title=f"{period_name.upper()} Episode {ep} - RL",
+                fig_path=os.path.join(period_dir, f"episode_{ep:02d}_rl_plot.png"),
+            )
+            _plot_episode_trace_4panel(
+                b_df, comfort_band_c,
+                title=f"{period_name.upper()} Episode {ep} - Baseline",
+                fig_path=os.path.join(period_dir, f"episode_{ep:02d}_baseline_plot.png"),
+            )
+
+        row = {
+            "episode": ep,
+            "start_timestamp": p["start_timestamp"],
+            "rl_reward": rl_m["reward"],
+            "baseline_reward": b_m["reward"],
+            "reward_diff_rl_minus_baseline": rl_m["reward"] - b_m["reward"],
+            "rl_comfort_penalty": rl_m["comfort_penalty"],
+            "baseline_comfort_penalty": b_m["comfort_penalty"],
+            "rl_energy": rl_m["energy"],
+            "baseline_energy": b_m["energy"],
+            "episode_length": rl_m["length"],
+        }
+        rows.append(row)
+
+        if verbose:
+            iterator.set_postfix(
+                rl=f"{row['rl_reward']:.1f}",
+                base=f"{row['baseline_reward']:.1f}",
+                diff=f"{row['reward_diff_rl_minus_baseline']:.1f}",
+            )
+
+    df = pd.DataFrame(rows)
+    summary = {
+        "period": period_name,
+        "rl_reward_mean": float(df["rl_reward"].mean()),
+        "baseline_reward_mean": float(df["baseline_reward"].mean()),
+        "reward_gain_mean": float(df["reward_diff_rl_minus_baseline"].mean()),
+        "rl_comfort_mean": float(df["rl_comfort_penalty"].mean()),
+        "baseline_comfort_mean": float(df["baseline_comfort_penalty"].mean()),
+        "rl_energy_mean": float(df["rl_energy"].mean()),
+        "baseline_energy_mean": float(df["baseline_energy"].mean()),
+        "rl_reward_std": float(df["rl_reward"].std(ddof=0)),
+        "baseline_reward_std": float(df["baseline_reward"].std(ddof=0))
+    }
+
+    df.to_csv(os.path.join(period_dir, f"{period_name}_episode_metrics.csv"), index=False)
+    pd.DataFrame([summary]).to_csv(os.path.join(period_dir, f"{period_name}_summary.csv"), index=False)
+
+    if verbose:
+        print(
+            f"[compare:{period_name}] done | "
+            f"RL mean={summary['rl_reward_mean']:.2f}±{summary['rl_reward_std']:.2f}, "
+            f"BASE mean={summary['baseline_reward_mean']:.2f}±{summary['baseline_reward_std']:.2f}, "
+            f"gain={summary['reward_gain_mean']:.2f}"
+        )
+
+    return df, summary
+
+
+def compare_rl_vs_baseline_2024(
+    trainer: BuildingRLTrainer,
+    output_dir: str,
+    n_episodes: int = 8,
+    episode_days: int = 7,
+    seed: int = 42,
+    deterministic: bool = True,
+    training_mode: str = "full",
+    n_plot_episodes: int = 2,
+    verbose: bool = True,
+    # ADD: explicit period control
+    val_period_start: str = "2024-08-01",
+    val_period_end: str = "2024-10-01",
+    test_period_start: str = "2024-10-01",
+    test_period_end: str = "2024-12-01",
+) -> Dict[str, Any]:
+    """
+    Compare trained RL policy vs thermostat baseline on 2024 val/test splits.
+    Saves per-episode traces, metrics CSVs, and 4-panel plots.
+    """
+    if trainer.model is None:
+        raise ValueError("Trainer has no model. Train or load model first.")
+
+    os.makedirs(output_dir, exist_ok=True)
+    base = trainer.base_params.copy()
+
+    val_df, val_summary = _compare_period_rl_vs_baseline(
+        trainer=trainer,
+        params_template=base,
+        period_name="val",
+        period_start=val_period_start,
+        period_end=val_period_end,
+        output_dir=output_dir,
+        n_episodes=n_episodes,
+        episode_days=episode_days,
+        deterministic=deterministic,
+        seed=seed,
+        training_mode=training_mode,
+        n_plot_episodes=n_plot_episodes,
+        verbose=verbose,
+    )
+    test_df, test_summary = _compare_period_rl_vs_baseline(
+        trainer=trainer,
+        params_template=base,
+        period_name="test",
+        period_start=test_period_start,
+        period_end=test_period_end,
+        output_dir=output_dir,
+        n_episodes=n_episodes,
+        episode_days=episode_days,
+        deterministic=deterministic,
+        seed=seed + 1,
+        training_mode=training_mode,
+        n_plot_episodes=n_plot_episodes,
+        verbose=verbose,
+    )
+
+    return {
+        "trainer": trainer,
+        "val_results": val_summary,
+        "test_results": test_summary,
+        "summary": {
+            "val_mean_reward": val_summary["rl_reward_mean"],
+            "test_mean_reward": test_summary["rl_reward_mean"],
+            "val_std_reward": val_summary["rl_reward_std"],
+            "test_std_reward": test_summary["rl_reward_std"],
+            "val_mean_comfort": val_summary["rl_comfort_mean"],
+            "test_mean_comfort": test_summary["rl_comfort_mean"],
+            "val_mean_energy": val_summary["rl_energy_mean"],
+            "test_mean_energy": test_summary["rl_energy_mean"],
+            "val_reward_gain_mean": val_summary["reward_gain_mean"],
+            "test_reward_gain_mean": test_summary["reward_gain_mean"],
+        },
+    }
+
+def _plot_episode_trace_4panel(
+    df: pd.DataFrame,
+    comfort_band_c: Tuple[float, float],
+    title: str = "",
+    fig_path: Optional[str] = None,
+    figsize: Tuple[int, int] = (16, 12),
+) -> plt.Figure:
+    """Plot a 4-panel episode trace: room temp, outside temp, comfort penalty, actions."""
+    comfort_low_c, comfort_high_c = comfort_band_c
+
+    fig, (ax_room, ax_out, ax_pen, ax_act) = plt.subplots(
+        4, 1, figsize=figsize, sharex=True,
+        gridspec_kw={"height_ratios": [2.0, 1.4, 1.2, 1.5]},
+    )
+
+    # --- 1) Room temperature ---
+    ax_room.plot(df["timestamp"], df["room_temp_c"], label="Room temp (°C)", linewidth=2, color="tab:blue")
+    ax_room.axhline(comfort_low_c, color="green", linestyle="--", linewidth=1.2, label=f"Comfort low ({comfort_low_c:.1f}°C)")
+    ax_room.axhline(comfort_high_c, color="red",   linestyle="--", linewidth=1.2, label=f"Comfort high ({comfort_high_c:.1f}°C)")
+    ax_room.set_ylabel("Room temp (°C)")
+    ax_room.set_title(title)
+    ax_room.grid(alpha=0.25)
+    ax_room.legend(loc="upper right")
+
+    # --- 2) Outside temperature ---
+    ax_out.plot(df["timestamp"], df["outside_temp_c"], label="Outside temp (°C)", linewidth=1.8, color="tab:orange")
+    ax_out.set_ylabel("Outside (°C)")
+    ax_out.grid(alpha=0.25)
+    ax_out.legend(loc="upper right")
+
+    # --- 3) Comfort penalty ---
+    ax_pen.plot(df["timestamp"], df["comfort_penalty"], color="black", linewidth=1.5, label="Comfort penalty")
+    ax_pen.set_ylabel("Penalty")
+    ax_pen.grid(alpha=0.25)
+    ax_pen.legend(loc="upper right")
+
+    # --- 4) Actions ---
+    if "action_supply" in df.columns:
+        ax_act.step(df["timestamp"], df["action_supply"],      where="post", label="Supply",      linewidth=1.4)
+    if "action_boiler" in df.columns:
+        ax_act.step(df["timestamp"], df["action_boiler"],      where="post", label="Boiler",      linewidth=1.4)
+    if "action_damper" in df.columns:
+        ax_act.step(df["timestamp"], df["action_damper"],      where="post", label="Damper",      linewidth=1.4)
+    if "action_reheat_mean" in df.columns:
+        ax_act.step(df["timestamp"], df["action_reheat_mean"], where="post", label="Reheat mean", linewidth=1.4)
+    ax_act.set_ylabel("Action value")
+    ax_act.set_xlabel("Timestamp")
+    ax_act.set_ylim(-1.1, 1.1)
+    ax_act.grid(alpha=0.25)
+    ax_act.legend(loc="upper right", ncol=2)
+
+    # x-axis formatting
+    ax_act.xaxis.set_major_locator(mdates.HourLocator(interval=12))
+    ax_act.xaxis.set_major_formatter(mdates.DateFormatter("%a %m-%d %H:%M"))
+    ax_act.xaxis.set_minor_locator(mdates.HourLocator(interval=3))
+    plt.setp(ax_act.get_xticklabels(), rotation=30, ha="right")
+
+    if not df.empty:
+        ax_act.set_xlim(
+            df["timestamp"].min(),
+            df["timestamp"].max() + pd.Timedelta(hours=6),
+        )
+
+    plt.tight_layout()
+
+    if fig_path is not None:
+        plt.savefig(fig_path, dpi=150, bbox_inches="tight")
+        print(f"Saved plot: {fig_path}")
+
+    return fig
