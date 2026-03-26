@@ -5,20 +5,36 @@ from gymnasium import spaces
 import gymnasium as gym
 import numpy as np
 import pandas as pd
+import re
 
 from smart_control.simulator.randomized_arrival_departure_occupancy import RandomizedArrivalDepartureOccupancy
-from smart_control.simulator.simulator import Simulator
-from smart_control.simulator.thermostat import Thermostat
+from smart_control.simulator.step_function_occupancy import StepFunctionOccupancy
+
+
+
+class _NaiveTimeOccupancyAdapter:
+    """Wrap occupancy model to force tz-naive timestamps."""
+    def __init__(self, base_occ: Any):
+        self._base_occ = base_occ
+
+    def average_zone_occupancy(self, zone_id, start_time, end_time):
+        s = pd.Timestamp(start_time)
+        e = pd.Timestamp(end_time)
+        if s.tzinfo is not None:
+            s = s.tz_localize(None)
+        if e.tzinfo is not None:
+            e = e.tz_localize(None)
+        return self._base_occ.average_zone_occupancy(zone_id, s, e)
 
 
 class BuildingGymEnv(gym.Env):
     """
     Action space (reduced):
-    - [0]: supply_air_temp_setpoint [-1,1] -> [285.15, 305.15] K (12°C - 32°C)
-    - [1]: boiler water setpoint [-1,1] -> [318, 338] K (45°C - 65°C)
-    - [2:2+n_zones]: per-zone VAV damper percentage [-1,1] -> [0.01, 1]
-    - [2+n_zones:2+2*n_zones]: per-zone VAV reheat valve [-1,1] -> [0, 1]
-    Total action dim: 2 + 2*n_zones
+    - [0]:      supply_air_temp_setpoint  [-1,1] -> [12°C, 32°C]
+    - [1]:      boiler_setpoint           [-1,1] -> [20°C, 65°C]
+    - [2]:      shared damper             [-1,1] -> [0.01, 1.0]  (same for all zones)
+    - [3..3+n]: per-zone reheat valve     [-1,1] -> [0.0, 1.0]
+    Total: 3 + n_zones
     """
 
     metadata = {"render_modes": ["human"]}
@@ -26,22 +42,27 @@ class BuildingGymEnv(gym.Env):
     def __init__(
         self,
         sim: Any,
-        mutable_schedule: MutableSetpointSchedule = None,
-        time_zone: str = "Europe/Brussels",
+        time_zone: str = "America/Los_Angeles",
         seed: Optional[int] = None,
         max_steps: Optional[int] = None,
         comfort_band_k: Tuple[float, float] = (294.15, 295.15),  # 21C to 22C
-        comfort_hours: Tuple[float, float] = (8.0, 18.0),
+        working_hours: Tuple[float, float] = (8.0, 18.0),
+        occupancy_model: str = "randomized",   # "randomized" or "step"
+        occupancy_per_zone: float = 10.0,
+        occupancy_kwargs: Optional[Dict[str, Any]] = None,
     ):
         super().__init__()
         self.sim = sim
-        self.mutable_schedule = mutable_schedule
         self.time_zone = time_zone
         # Default to steps for 24h
         self.max_steps = max_steps if max_steps is not None else (24 * 60 * 60) // self.sim.time_step_sec
 
         self.comfort_band_k = comfort_band_k
-        self.comfort_hours = comfort_hours
+        self.working_hours = working_hours
+
+        self.occupancy_model = occupancy_model
+        self.occupancy_per_zone = float(occupancy_per_zone)
+        self.occupancy_kwargs = occupancy_kwargs or {}
 
         self._last_energy_components = {
             "blower_rate": float("nan"),
@@ -53,45 +74,39 @@ class BuildingGymEnv(gym.Env):
         self.zone_ids = sorted(zone_temps_dict.keys())  # e.g., ["room_1", "room_2"]
         self.n_zones = len(self.zone_ids)
 
-        # create occupancies (one per zone)
-        self.occupancies: List[RandomizedArrivalDepartureOccupancy] = [
-            RandomizedArrivalDepartureOccupancy(
-                zone_assignment=10, # this is the number of occupants
-                earliest_expected_arrival_hour=7,
-                latest_expected_arrival_hour=9,
-                earliest_expected_departure_hour=16,
-                latest_expected_departure_hour=18,
-                time_step_sec=self.sim.time_step_sec,
-                seed=(None if seed is None else seed + i),
-                time_zone=self.time_zone,
-            )
-            for i in range(self.n_zones)
-        ]
+        self.occupancies = self._build_occupancies(seed=seed)
 
-        # action: [ah_heat, ah_cool, boiler, vav_1_damper, vav_2_damper, ..., vav_1_reheat, vav_2_reheat, ...]
+        # action: [ah_supply, boiler, vav_1_damper, vav_2_damper, ..., vav_1_reheat, vav_2_reheat, ...]
         # 2 shared + 2 per zone
         self.action_space = spaces.Box(
             low=-1.0, high=1.0,
-            shape=(2 + 2 * self.n_zones,),
+            shape=(3 + self.n_zones,),
             dtype=np.float32,
         )
         self.observation_space = spaces.Box(
             low=-1e3, high=1e4,
-            shape=(self.n_zones * 2 + 1,),  # temps + occupancies + time
-            dtype=np.float32
-)
+            shape=(self.n_zones * 2 + 4,),  # temps + occupancies + hour + supply_air + boiler + ambient
+            dtype=np.float32,
+        )
         # convenience references
         self.air_handler = self.sim.hvac.air_handler
         self.boiler = self.sim.hvac.boiler
         self.vavs = self.sim.hvac.vavs  # dict: zone_id -> VAV object
 
-    def _get_obs(self) -> np.ndarray:
-        """Extract comprehensive observation."""
-        zone_temps_dict = self.sim.building.get_zone_average_temps()
-        temps = np.array([zone_temps_dict[zid] for zid in self.zone_ids], dtype=np.float32)
-
+    def _occupancy_window_naive(self) -> Tuple[pd.Timestamp, pd.Timestamp]:
+        """Return [start, end] as tz-naive timestamps for occupancy models."""
         start = self.sim.current_timestamp
         end = start + pd.to_timedelta(self.sim.time_step_sec, unit="s")
+
+        if isinstance(start, pd.Timestamp) and start.tzinfo is not None:
+            return start.tz_localize(None), end.tz_localize(None)
+        return start, end
+
+    def _get_obs(self) -> np.ndarray:
+        zone_temps_dict = self.sim.building.get_zone_average_temps()
+        temps = np.array([zone_temps_dict[zid] - 273.15 for zid in self.zone_ids], dtype=np.float32)
+
+        start, end = self._occupancy_window_naive()
 
         occupancies = np.array(
             [
@@ -101,55 +116,64 @@ class BuildingGymEnv(gym.Env):
             dtype=np.float32,
         )
 
-        current_hour = start.hour / 24.0
+        current_hour = np.float32(start.hour / 24.0)
 
-        return np.concatenate([temps, occupancies, [current_hour]])
+        # add current setpoints so agent knows what it set last step
+        supply_air_sp = np.float32(self.air_handler.heating_air_temp_setpoint - 273.15)
+        boiler_sp     = np.float32(self.boiler.supply_water_setpoint - 273.15)
+
+        ambient_temp  = np.float32(
+            self.air_handler.get_observation(
+                "outside_air_temperature_sensor",
+                self.sim.current_timestamp,
+            ) - 273.15
+        )
+
+        return np.concatenate([
+            temps,           # n_zones: zone temps in K
+            occupancies,     # n_zones: occupancy per zone
+            [current_hour],  # 1: time of day
+            [supply_air_sp], # 1: current AH setpoint
+            [boiler_sp],     # 1: current boiler setpoint
+            [ambient_temp],  # 1: outside temp (important for heating decisions)
+        ])
 
     def reset(self, *, seed: Optional[int] = None, options: Optional[Dict] = None) -> Tuple[np.ndarray, Dict]:
         if seed is not None:
             np.random.seed(seed)
         self.sim.reset()
 
-        # deterministic occupancies when seed is given
-        base_seed = 0 if seed is None else int(seed)
-        self.occupancies = [
-            RandomizedArrivalDepartureOccupancy(
-                zone_assignment=10,
-                earliest_expected_arrival_hour=7,
-                latest_expected_arrival_hour=9,
-                earliest_expected_departure_hour=16,
-                latest_expected_departure_hour=18,
-                time_step_sec=self.sim.time_step_sec,
-                seed=base_seed + i,
-                time_zone=self.time_zone,
-            )
-            for i in range(self.n_zones)
-        ]
+        self.occupancies = self._build_occupancies(seed=seed)
         self.step_count = 0
         return self._get_obs(), {}
 
     def step(self, action: np.ndarray):
         action = np.asarray(action, dtype=np.float32).ravel()
-        assert action.size == 2 + 2 * self.n_zones
+        assert action.size == 3 + self.n_zones
 
-        supply_air_action = action[0]
-        boiler_action     = action[1]
-        vav_damper_actions = action[2:2+self.n_zones]
-        vav_reheat_actions = action[2+self.n_zones:2+2*self.n_zones]
+        supply_air_action  = action[0]
+        boiler_action      = action[1]
+        shared_damper      = action[2]
+        vav_reheat_actions = action[3:3 + self.n_zones]
 
-        # supply air temp: [-1,1] -> [285.15, 305.15] K  (12°C to 32°C)
+        # supply air: [-1,1] -> [285.15, 305.15] K [12°C, 32°C]
         supply_air_sp = 295.15 + supply_air_action * 10.0
-
         ah_heat_sp = supply_air_sp - 0.5
         ah_cool_sp = supply_air_sp + 0.5
 
-        # boiler: [-1,1] -> [318.15, 338.15] K (45°C to 65°C)
-        boiler_sp = 328.15 + boiler_action * 10.0
+        # boiler: [-1,1] -> [318.15, 338.15] K [20°C, 65°C]
+        boiler_sp = 316.65 + boiler_action * 22.5   # center=43.5°C, range=[21°C, 66°C]
+
+        # clamp boiler to at least outside air temp (the sim requires it)
+        ambient_temp_k = float(
+            self.air_handler.get_observation(
+                "outside_air_temperature_sensor",
+                self.sim.current_timestamp,
+            )
+        )
+        boiler_sp = max(boiler_sp, ambient_temp_k + 1.0)  # at least 1°C above outside
 
         action_timestamp = self.sim.current_timestamp
-
-        if self.mutable_schedule is not None:
-            self.mutable_schedule.set_temp_window((ah_heat_sp - 0.1, ah_heat_sp + 0.1))
 
         self.air_handler.set_action(
             "supply_air_heating_temperature_setpoint",
@@ -163,23 +187,29 @@ class BuildingGymEnv(gym.Env):
         )
         self.boiler.set_action("supply_water_setpoint", float(boiler_sp), action_timestamp)
 
-        min_damper = 0.01
-        damper_cmds = np.clip((vav_damper_actions + 1.0) * 0.5, min_damper, 1.0)
+        # shared damper — same for all zones
+        min_damper = 0.00001
+        damper_cmd = float(np.clip((shared_damper + 1.0) * 0.5, min_damper, 1.0))
+
         reheat_cmds = np.clip((vav_reheat_actions + 1.0) * 0.5, 0.0, 1.0)
 
         for i, zone_id in enumerate(self.zone_ids):
             vav = self.vavs[zone_id]
             vav.set_action(
                 "supply_air_damper_percentage_command",
-                float(damper_cmds[i]),
+                damper_cmd,   # shared for all zones
                 action_timestamp,
             )
-            vav.reheat_valve_setting = float(reheat_cmds[i])
+            vav.reheat_valve_setting = float(reheat_cmds[i])  # per zone
 
         self.sim.step_sim()
         obs = self._get_obs()
 
-        r_obj = self.sim.reward_info(self.occupancies[0])
+        occ_for_reward = self.occupancies[0]
+        if self.occupancy_model == "step":
+            occ_for_reward = _NaiveTimeOccupancyAdapter(occ_for_reward)
+
+        r_obj = self.sim.reward_info(occ_for_reward)
         comfort_penalty, energy_rate = self._reward_terms_from_reward_obj(r_obj)
         total_reward = self._combine_reward_terms(comfort_penalty, energy_rate)
 
@@ -209,7 +239,7 @@ class BuildingGymEnv(gym.Env):
             ts = self.sim.current_timestamp
             hour_of_day = ts.hour + ts.minute / 60.0 + ts.second / 3600.0
 
-            start_hour, end_hour = self.comfort_hours
+            start_hour, end_hour = self.working_hours
 
             # Normal same-day window, e.g. 8 -> 18
             if start_hour <= end_hour:
@@ -222,10 +252,28 @@ class BuildingGymEnv(gym.Env):
         comfort_low_k, comfort_high_k = self.comfort_band_k
 
         total_comfort_penalty = 0.0
-        if self._is_comfort_active():
-            for ziv in r.zone_reward_infos.values():
-                t = float(ziv.zone_air_temperature)
-                total_comfort_penalty += max(comfort_low_k - t, 0.0) + max(t - comfort_high_k, 0.0)
+
+        occ_by_zone = self._zone_occupancies_now()
+
+        weighted_violation_sum = 0.0
+        weight_sum = 0.0
+
+        for zone_id, ziv in r.zone_reward_infos.items():
+            t = float(ziv.zone_air_temperature)
+            temp_violation = max(comfort_low_k - t, 0.0) + max(t - comfort_high_k, 0.0)
+
+            # old: occ = float(occ_by_zone.get(zone_id, 0.0))
+            occ = self._occupancy_for_reward_zone(zone_id, occ_by_zone)
+
+            w = occ ** 0.5
+            weighted_violation_sum += w * temp_violation
+            weight_sum += w
+
+        total_comfort_penalty = (
+            weighted_violation_sum / (weight_sum + 1e-6)
+            if weight_sum > 0.0
+            else 0.0
+        )
 
         blower_rate = sum(
             float(ainfo.blower_electrical_energy_rate)
@@ -284,12 +332,84 @@ class BuildingGymEnv(gym.Env):
 
 
     def _combine_reward_terms(self, comfort_penalty: float, energy_rate: float) -> float:
-      energy_weight = 1e-4
-      return float(-(comfort_penalty + energy_weight * energy_rate))
+        energy_weight = 1e-4
+        if self.occupancy_model == "step":
+            energy_weight = 0.0
+
+        return float(-(comfort_penalty + energy_weight * energy_rate))
 
     def _reduce_reward_obj_to_scalar(self, r: Any) -> float:
       comfort_penalty, energy_rate = self._reward_terms_from_reward_obj(r)
       return self._combine_reward_terms(comfort_penalty, energy_rate)
+
+    def _build_occupancies(self, seed: Optional[int]) -> List[Any]:
+        occs: List[Any] = []
+        base_seed = None if seed is None else int(seed)
+
+        for i, _zone_id in enumerate(self.zone_ids):
+            if self.occupancy_model == "step":
+                # Step-function occupancy (deterministic schedule)
+                # Convert hours to pd.Timedelta
+                work_start_hour, work_end_hour = self.working_hours
+                default_kwargs = {
+                    "work_start_time": pd.Timedelta(hours=work_start_hour),
+                    "work_end_time": pd.Timedelta(hours=work_end_hour),
+                    "work_occupancy": self.occupancy_per_zone,
+                    "nonwork_occupancy": 0.0,
+                }
+                default_kwargs.update(self.occupancy_kwargs)
+                occs.append(StepFunctionOccupancy(**default_kwargs))
+            else:
+                # Randomized occupancy (stochastic)
+                default_kwargs = {
+                    "zone_assignment": int(self.occupancy_per_zone),
+                    "earliest_expected_arrival_hour": 7,
+                    "latest_expected_arrival_hour": 9,
+                    "earliest_expected_departure_hour": 16,
+                    "latest_expected_departure_hour": 18,
+                    "time_step_sec": self.sim.time_step_sec,
+                    "seed": (None if base_seed is None else base_seed + i),
+                    "time_zone": self.time_zone,
+                }
+                default_kwargs.update(self.occupancy_kwargs)
+                occs.append(RandomizedArrivalDepartureOccupancy(**default_kwargs))
+
+        return occs
+
+    def _zone_occupancies_now(self) -> Dict[str, float]:
+        start, end = self._occupancy_window_naive()
+
+        occ_dict = {}
+        for occ, zone_id in zip(self.occupancies, self.zone_ids):
+            occ_val = float(occ.average_zone_occupancy(zone_id, start, end))
+            occ_dict[zone_id] = occ_val
+        return occ_dict
+
+    def _zone_suffix(self, zid: str) -> Optional[str]:
+        """Extract numeric suffix from ids like room_1 / zone_id_1."""
+        m = re.search(r"(\d+)$", str(zid))
+        return m.group(1) if m else None
+
+    def _occupancy_for_reward_zone(
+        self,
+        reward_zone_id: str,
+        occ_by_zone: Dict[str, float],
+    ) -> float:
+        """Map reward zone id (e.g., zone_id_1) to occupancy zone id (e.g., room_1)."""
+        # direct hit
+        if reward_zone_id in occ_by_zone:
+            return float(occ_by_zone[reward_zone_id])
+
+        # suffix-based fallback (robust to room_1 vs zone_id_1 naming)
+        target_suffix = self._zone_suffix(reward_zone_id)
+        if target_suffix is None:
+            return 0.0
+
+        for occ_zone_id, occ in occ_by_zone.items():
+            if self._zone_suffix(occ_zone_id) == target_suffix:
+                return float(occ)
+
+        return 0.0
 
     def render(self, mode="human"):
         self.sim.get_video()

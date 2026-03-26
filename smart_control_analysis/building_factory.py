@@ -1,6 +1,10 @@
 from smart_control_analysis.custom_sbsim.mutable_schedule import MutableSetpointSchedule
 import pandas as pd
+from smart_control.simulator.weather_controller import WeatherController, ReplayWeatherController
+from typing import Any, Dict, Optional
 import pytz
+import warnings
+
 
 from smart_control_analysis.gym_wrapper import BuildingGymEnv
 from smart_control.simulator.air_handler import AirHandler
@@ -9,11 +13,13 @@ from smart_control.simulator.building import FloorPlanBasedBuilding
 from smart_control.simulator.building import MaterialProperties
 from smart_control.simulator.hvac_floorplan_based import FloorPlanBasedHvac
 from smart_control.simulator.setpoint_schedule import SetpointSchedule
-from smart_control.simulator.weather_controller import WeatherController
 from smart_control_analysis.custom_sbsim.direct_vav_tf_simulator import DirectVavTFSimulator
 
 
-def building_factory(params: dict):
+def building_factory(
+        params: dict,
+        training_mode: Optional[str] = None,
+        ):
     """
     Create simulator and environment with given parameters.
 
@@ -23,6 +29,11 @@ def building_factory(params: dict):
         Configuration dict - now includes material properties and building params
     """
     import numpy as np
+
+    sim_tz = params.get("time_zone", "America/Los_Angeles")
+    start_ts = pd.Timestamp(params.get("start_timestamp", "2024-01-15 06:00:00"))
+    if start_ts.tzinfo is None:
+        start_ts = start_ts.tz_localize(sim_tz)
 
     # Ensure a minimum difference between outdoor_low_temp and outdoor_high_temp
     min_delta = 0.1  # Minimum allowed difference in °C
@@ -63,6 +74,12 @@ def building_factory(params: dict):
         conductivity=params.get("exterior_wall_conductivity", 0.4),
     )
 
+    # Suppress known simulator warning from building_utils.py (UserWarning)
+    #warnings.filterwarnings(
+     #   "ignore",
+      #  category=UserWarning,
+       # module=r"smart_control\.simulator\.building_utils",
+    #)
     # Building with params
     building = FloorPlanBasedBuilding(
         cv_size_cm=params.get("cv_size_cm", 100.0),
@@ -78,12 +95,21 @@ def building_factory(params: dict):
         include_radiative_heat_transfer=False,
         view_factor_method="ScriptF",
     )
-    weather_controller = WeatherController(
-        default_low_temp=273.15 + params.get("outdoor_low_temp", 5),
-        default_high_temp=273.15 + params.get("outdoor_high_temp", 20),
-        convection_coefficient=params.get("convection_coefficient", 60.0),  # stronger outside convection
-
-    )
+    weather_source = params.get("weather_source", "sinusoidal")
+    if weather_source == "replay":
+        weather_csv_path = params.get("weather_csv_path")
+        if not weather_csv_path:
+            raise ValueError("weather_source='replay' requires params['weather_csv_path']")
+        weather_controller = ReplayWeatherController(
+            local_weather_path=weather_csv_path,
+            convection_coefficient=params.get("convection_coefficient", 60.0),
+        )
+    else:
+        weather_controller = WeatherController(
+            default_low_temp=273.15 + params.get("outdoor_low_temp", 5),
+            default_high_temp=273.15 + params.get("outdoor_high_temp", 15),
+            convection_coefficient=params.get("convection_coefficient", 60.0),
+        )
 
     boiler = Boiler(
         reheat_water_setpoint=273.15 + params.get("boiler_setpoint_celsius", 55),
@@ -102,15 +128,14 @@ def building_factory(params: dict):
         sim_weather_controller=weather_controller,
     )
 
-    mutable_schedule = MutableSetpointSchedule(time_zone=pytz.timezone("Europe/Brussels"))
-
+    # Our sim does not use this schedule
     schedule = SetpointSchedule(
-            morning_start_hour=7,                 # Start comfort mode at 07:00
-            evening_start_hour=19,                # Start eco mode at 19:00
-            comfort_temp_window=(273+22,273+23.5),
-            eco_temp_window=(273+18, 273+28),
-            time_zone=pytz.timezone("Europe/Brussels")
-        )
+        morning_start_hour=7,
+        evening_start_hour=19,
+        comfort_temp_window=(273+22, 273+23.5),
+        eco_temp_window=(273+18, 273+28),
+        time_zone=pytz.timezone(sim_tz),  # was Europe/Brussels
+    )
 
     hvac = FloorPlanBasedHvac(
         air_handler=air_handler,
@@ -125,23 +150,42 @@ def building_factory(params: dict):
         building=building,
         hvac=hvac,
         weather_controller=weather_controller,
-        time_step_sec=1500,
+        time_step_sec=params.get("time_step_sec", 300),
         convergence_threshold=0.5,
         iteration_limit=48,
         iteration_warning=35,
-        start_timestamp=pd.Timestamp("2025-12-15 08:00:00"),
+        start_timestamp=start_ts,   # <- use tz-aware timestamp
     )
 
-    env = BuildingGymEnv(building_sim, mutable_schedule=None)
+    occupancy_model = "randomized"
+    if training_mode == "comfort_only":
+        occupancy_model = "step"
+    elif training_mode == "full":
+        occupancy_model = "randomized"
+
+    env = BuildingGymEnv(
+        sim=building_sim,
+        time_zone=sim_tz,           # keep env consistent
+        occupancy_model=occupancy_model,
+        )
     return building_sim, env
 
 
 def get_base_params() -> dict:
     """Return default parameter configuration."""
     return {
+        # Sim
+        "time_step_sec": 300,
+
         # Weather
-        "outdoor_low_temp": 10,
-        "outdoor_high_temp": 20,
+        "outdoor_low_temp": -5,
+        "outdoor_high_temp": 5,
+        "convection_coefficient": 100.0,    # stronger outside exchange
+        "start_timestamp": "2024-01-15 06:00:00",
+        "time_zone": "America/Los_Angeles",
+        "weather_source": "replay",
+        "weather_csv_path": "/user/gent/453/vsc45342/thesis/weather_data/2024.csv",
+
 
         # Boiler
         "boiler_setpoint_celsius": 45,
@@ -149,7 +193,7 @@ def get_base_params() -> dict:
         "pump_efficiency": 1.0,
 
         # Air handler
-        "recirculation": 0.8,
+        "recirculation": 0.7,
         "ah_heating_setpoint_celsius": 18,
         "ah_cooling_setpoint_celsius": 40,
         "fan_pressure": 800,
@@ -164,7 +208,7 @@ def get_base_params() -> dict:
         "cv_size_cm": 25.0,
         "floor_height_cm": 300.0,
         "initial_temp_celsius": 20.0,
-        "buffer_from_walls": 3,
+        "buffer_from_walls": 1,
 
         # Material properties - inside air
         "inside_air_density": 1.225,
@@ -177,54 +221,7 @@ def get_base_params() -> dict:
         "inside_wall_conductivity": 1.4,
 
         # Material properties - exterior wall
-        "exterior_wall_density": 2000,
-        "exterior_wall_heat_capacity": 900,
-        "exterior_wall_conductivity": 0.4,
-    }
-
-def get_base_params_with_varying_weather() -> dict:
-    """Extreme params to force significant night temperature drops."""
-    return {
-        # Weather: very cold nights, slightly less cold days
-        "outdoor_low_temp": 0,
-        "outdoor_high_temp": 10,
-
-        # Boiler (keep moderate so it can’t fully compensate)
-        "boiler_setpoint_celsius": 45,  # lower reheat water setpoint
-
-        "pump_head": 40000,
-        "pump_efficiency": 0.7,
-
-        # Air handler: less recirculation so more cold air mixes in
-        "recirculation": 0.01,                 # was 0.8; more outdoor air -> colder supply
-        "ah_heating_setpoint_celsius": 18,    # modest heating
-        "ah_cooling_setpoint_celsius": 40,
-        "fan_pressure": 600,
-        "fan_efficiency": 0.6,
-        "max_airflow": 6.0,
-
-        # VAV
-        "vav_max_flow": 1.0,
-        "vav_reheat_flow": 0.2,
-
-        # Building geometry: thin CV → less mass per wall cell
-        "cv_size_cm": 5.0,       # 10 cm cells — thin walls
-        "floor_height_cm": 300.0,
-        "initial_temp_celsius": 20.0,
-        "buffer_from_walls": 1,
-
-        # Inside air
-        "inside_air_density": 1.225,
-        "inside_air_heat_capacity": 600,
-        "inside_air_conductivity": 0.03,
-
-        # Interior walls: almost no thermal mass, some conductivity
-        "inside_wall_density": 300,
-        "inside_wall_heat_capacity": 400,
-        "inside_wall_conductivity": 1.0,
-
-        # Exterior walls: extremely leaky, minimal mass
-        "exterior_wall_density": 1,
+        "exterior_wall_density": 150,
         "exterior_wall_heat_capacity": 300,
-        "exterior_wall_conductivity": 1000.0,   # very high → fast heat loss
+        "exterior_wall_conductivity": 8.0,
     }
