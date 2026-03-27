@@ -4,6 +4,7 @@ from smart_control.simulator.weather_controller import WeatherController, Replay
 from typing import Any, Dict, Optional
 import pytz
 import warnings
+import os
 
 
 from smart_control_analysis.gym_wrapper import BuildingGymEnv
@@ -97,7 +98,7 @@ def building_factory(
     )
     weather_source = params.get("weather_source", "sinusoidal")
     if weather_source == "replay":
-        weather_csv_path = params.get("weather_csv_path")
+        weather_csv_path = os.path.expanduser(params.get("weather_csv_path", ""))
         if not weather_csv_path:
             raise ValueError("weather_source='replay' requires params['weather_csv_path']")
         weather_controller = ReplayWeatherController(

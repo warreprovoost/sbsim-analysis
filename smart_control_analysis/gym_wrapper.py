@@ -70,6 +70,10 @@ class BuildingGymEnv(gym.Env):
 
         self.occupancies = self._build_occupancies(seed=seed)
 
+        self._last_shared_damper_cmd = np.float32(0.5)
+        self._last_reheat_cmds = np.zeros(self.n_zones, dtype=np.float32)
+
+
         # action: [ah_supply, boiler, vav_1_damper, vav_2_damper, ..., vav_1_reheat, vav_2_reheat, ...]
         # 2 shared + 2 per zone
         self.action_space = spaces.Box(
@@ -79,7 +83,7 @@ class BuildingGymEnv(gym.Env):
         )
         self.observation_space = spaces.Box(
             low=-1e3, high=1e4,
-            shape=(self.n_zones * 2 + 4,),  # temps + occupancies + hour + supply_air + boiler + ambient
+            shape=(self.n_zones * 3 + 9,),
             dtype=np.float32,
         )
         # convenience references
@@ -99,6 +103,27 @@ class BuildingGymEnv(gym.Env):
 
         return start, end
 
+    def _time_features(self, start: pd.Timestamp) -> np.ndarray:
+        hour_float = start.hour + start.minute / 60.0 + start.second / 3600.0
+        hour_angle = 2.0 * np.pi * (hour_float / 24.0)
+
+        dow = start.dayofweek
+        dow_angle = 2.0 * np.pi * (dow / 7.0)
+
+        is_weekend = 1.0 if dow >= 5 else 0.0
+
+        return np.array(
+            [
+                np.sin(hour_angle),
+                np.cos(hour_angle),
+                np.sin(dow_angle),
+                np.cos(dow_angle),
+                is_weekend,
+            ],
+            dtype=np.float32,
+        )
+
+
     def _get_obs(self) -> np.ndarray:
         zone_temps_dict = self.sim.building.get_zone_average_temps()
         temps = np.array([zone_temps_dict[zid] - 273.15 for zid in self.zone_ids], dtype=np.float32)
@@ -113,13 +138,12 @@ class BuildingGymEnv(gym.Env):
             dtype=np.float32,
         )
 
-        current_hour = np.float32(start.hour / 24.0)
+        time_feats = self._time_features(start)
 
-        # add current setpoints so agent knows what it set last step
         supply_air_sp = np.float32(self.air_handler.heating_air_temp_setpoint - 273.15)
-        boiler_sp     = np.float32(self.boiler.supply_water_setpoint - 273.15)
+        boiler_sp = np.float32(self.boiler.supply_water_setpoint - 273.15)
 
-        ambient_temp  = np.float32(
+        ambient_temp = np.float32(
             self.air_handler.get_observation(
                 "outside_air_temperature_sensor",
                 self.sim.current_timestamp,
@@ -127,12 +151,19 @@ class BuildingGymEnv(gym.Env):
         )
 
         return np.concatenate([
-            temps,           # n_zones: zone temps in K
-            occupancies,     # n_zones: occupancy per zone
-            [current_hour],  # 1: time of day
-            [supply_air_sp], # 1: current AH setpoint
-            [boiler_sp],     # 1: current boiler setpoint
-            [ambient_temp],  # 1: outside temp (important for heating decisions)
+            temps,                                        # n
+            occupancies,                                  # n
+            self._last_reheat_cmds.astype(np.float32),    # n
+            time_feats,                                   # 5
+            np.array(
+                [
+                    supply_air_sp,
+                    boiler_sp,
+                    ambient_temp,
+                    self._last_shared_damper_cmd,
+                ],
+                dtype=np.float32,
+            ),                                            # 4
         ])
 
     def reset(self, *, seed: Optional[int] = None, options: Optional[Dict] = None) -> Tuple[np.ndarray, Dict]:
@@ -142,6 +173,9 @@ class BuildingGymEnv(gym.Env):
 
         self.occupancies = self._build_occupancies(seed=seed)
         self.step_count = 0
+        self._last_shared_damper_cmd = np.float32(0.5)
+        self._last_reheat_cmds = np.zeros(self.n_zones, dtype=np.float32)
+
         return self._get_obs(), {}
 
     def step(self, action: np.ndarray):
@@ -189,6 +223,8 @@ class BuildingGymEnv(gym.Env):
         damper_cmd = float(np.clip((shared_damper + 1.0) * 0.5, min_damper, 1.0))
 
         reheat_cmds = np.clip((vav_reheat_actions + 1.0) * 0.5, 0.0, 1.0)
+        self._last_shared_damper_cmd = np.float32(damper_cmd)
+        self._last_reheat_cmds = reheat_cmds.astype(np.float32)
 
         for i, zone_id in enumerate(self.zone_ids):
             vav = self.vavs[zone_id]

@@ -932,7 +932,15 @@ def _run_episode_trace(
             "outside_temp_c": outside_temp_c,
             "comfort_penalty": float(info.get("comfort_penalty", 0.0)),
             "energy_rate": float(info.get("energy_rate", 0.0)),
+            "blower_rate": float(info.get("blower_rate", 0.0)),
+            "ah_conditioning_rate": float(info.get("ah_conditioning_rate", 0.0)),
+            "boiler_gas_rate": float(info.get("boiler_gas_rate", 0.0)),
+            "pump_rate_raw": float(info.get("pump_rate_raw", 0.0)),
+            "reheat_coil_rate": float(info.get("reheat_coil_rate", 0.0)),
             "reward": float(reward),
+            "reward_total": float(info.get("reward_total", reward)),
+            "supply_air_sp_C": float(info.get("supply_air_sp_C", np.nan)),
+            "boiler_sp_C": float(info.get("boiler_sp_C", np.nan)),
         }
         row.update(_extract_action_channels(action))
         rows.append(row)
@@ -1176,6 +1184,8 @@ def _plot_episode_trace_4panel(
     )
 
     # --- 1) Room temperature ---
+    working_hours = (8.0, 18.0)
+    _shade_working_hours(ax_room, df["timestamp"], working_hours=working_hours)
     ax_room.plot(df["timestamp"], df["room_temp_c"], label="Room temp (°C)", linewidth=2, color="tab:blue")
     ax_room.axhline(comfort_low_c, color="green", linestyle="--", linewidth=1.2, label=f"Comfort low ({comfort_low_c:.1f}°C)")
     ax_room.axhline(comfort_high_c, color="red",   linestyle="--", linewidth=1.2, label=f"Comfort high ({comfort_high_c:.1f}°C)")
@@ -1230,3 +1240,176 @@ def _plot_episode_trace_4panel(
         print(f"Saved plot: {fig_path}")
 
     return fig
+
+def _plot_episode_trace_6panel(
+    df: pd.DataFrame,
+    comfort_band_c: Tuple[float, float],
+    title: str = "",
+    fig_path: Optional[str] = None,
+    figsize: Tuple[int, int] = (18, 20),
+) -> plt.Figure:
+    """
+    Plot a 6-panel episode trace:
+      1. Room temperature + comfort band
+      2. Outside temperature
+      3. Comfort penalty
+      4. Energy rate (W)
+      5. Cumulative reward
+      6. Actions
+    """
+    comfort_low_c, comfort_high_c = comfort_band_c
+
+    fig, axes = plt.subplots(
+        6, 1, figsize=figsize, sharex=True,
+        gridspec_kw={"height_ratios": [2.0, 1.2, 1.2, 1.4, 1.4, 1.5]},
+    )
+    ax_room, ax_out, ax_pen, ax_energy, ax_reward, ax_act = axes
+
+    # --- 1) Room temperature ---
+    working_hours = (8.0, 18.0)
+    _shade_working_hours(ax_room, df["timestamp"], working_hours=working_hours)
+    ax_room.plot(df["timestamp"], df["room_temp_c"],
+                 label="Room temp (°C)", linewidth=2, color="tab:blue")
+    ax_room.axhline(comfort_low_c,  color="green", linestyle="--", linewidth=1.2,
+                    label=f"Comfort low ({comfort_low_c:.1f}°C)")
+    ax_room.axhline(comfort_high_c, color="red",   linestyle="--", linewidth=1.2,
+                    label=f"Comfort high ({comfort_high_c:.1f}°C)")
+    ax_room.fill_between(
+        df["timestamp"], comfort_low_c, comfort_high_c,
+        alpha=0.07, color="green", label="Comfort band",
+    )
+    ax_room.set_ylabel("Room temp (°C)")
+    ax_room.set_title(title, fontsize=13, fontweight="bold")
+    ax_room.grid(alpha=0.25)
+    ax_room.legend(loc="upper right", fontsize=8)
+
+    # --- 2) Outside temperature ---
+    ax_out.plot(df["timestamp"], df["outside_temp_c"],
+                label="Outside temp (°C)", linewidth=1.8, color="tab:orange")
+    ax_out.set_ylabel("Outside (°C)")
+    ax_out.grid(alpha=0.25)
+    ax_out.legend(loc="upper right", fontsize=8)
+
+    # --- 3) Comfort penalty ---
+    ax_pen.fill_between(df["timestamp"], 0, df["comfort_penalty"],
+                        alpha=0.35, color="crimson")
+    ax_pen.plot(df["timestamp"], df["comfort_penalty"],
+                color="crimson", linewidth=1.2, label="Comfort penalty")
+    ax_pen.set_ylabel("Comfort penalty")
+    ax_pen.grid(alpha=0.25)
+    ax_pen.legend(loc="upper right", fontsize=8)
+
+    # --- 4) Energy rate ---
+    if "energy_rate" in df.columns:
+        ax_energy.fill_between(df["timestamp"], 0, df["energy_rate"],
+                               alpha=0.3, color="tab:purple")
+        ax_energy.plot(df["timestamp"], df["energy_rate"],
+                       color="tab:purple", linewidth=1.2, label="Energy rate (W)")
+        ax_energy.set_ylabel("Energy (W)")
+    else:
+        ax_energy.text(0.5, 0.5, "No energy_rate column",
+                       ha="center", va="center", transform=ax_energy.transAxes)
+        ax_energy.set_ylabel("Energy (W)")
+    ax_energy.grid(alpha=0.25)
+    ax_energy.legend(loc="upper right", fontsize=8)
+
+    # --- 5) Cumulative + step reward ---
+    if "reward" in df.columns:
+        cum_reward = df["reward"].cumsum()
+        ax_reward.plot(df["timestamp"], cum_reward,
+                       color="tab:green", linewidth=2, label="Cumulative reward")
+        ax_r2 = ax_reward.twinx()
+        ax_r2.plot(df["timestamp"], df["reward"],
+                   color="tab:green", linewidth=0.8, alpha=0.4, label="Step reward")
+        ax_r2.set_ylabel("Step reward", fontsize=8, color="tab:green")
+        ax_r2.tick_params(axis="y", labelcolor="tab:green")
+        ax_reward.set_ylabel("Cumul. reward")
+        ax_reward.legend(loc="upper left", fontsize=8)
+        ax_r2.legend(loc="upper right", fontsize=8)
+    else:
+        ax_reward.text(0.5, 0.5, "No reward column",
+                       ha="center", va="center", transform=ax_reward.transAxes)
+        ax_reward.set_ylabel("Reward")
+    ax_reward.grid(alpha=0.25)
+
+    # --- 6) Actions ---
+    action_cols = {
+        "action_supply":      "Supply air",
+        "action_boiler":      "Boiler",
+        "action_damper":      "Damper",
+        "action_reheat_mean": "Reheat mean",
+    }
+    for col, lbl in action_cols.items():
+        if col in df.columns:
+            ax_act.step(df["timestamp"], df[col], where="post",
+                        label=lbl, linewidth=1.4)
+    ax_act.axhline(0, color="black", linewidth=0.6, linestyle=":")
+    ax_act.set_ylabel("Action [-1, 1]")
+    ax_act.set_xlabel("Timestamp")
+    ax_act.set_ylim(-1.15, 1.15)
+    ax_act.grid(alpha=0.25)
+    ax_act.legend(loc="upper right", ncol=2, fontsize=8)
+
+    # x-axis ticks
+    ax_act.xaxis.set_major_locator(mdates.HourLocator(interval=12))
+    ax_act.xaxis.set_major_formatter(mdates.DateFormatter("%a %m-%d %H:%M"))
+    ax_act.xaxis.set_minor_locator(mdates.HourLocator(interval=3))
+    plt.setp(ax_act.get_xticklabels(), rotation=30, ha="right")
+
+    if not df.empty:
+        ax_act.set_xlim(
+            df["timestamp"].min(),
+            df["timestamp"].max() + pd.Timedelta(hours=3),
+        )
+
+    plt.tight_layout()
+
+    if fig_path is not None:
+        plt.savefig(fig_path, dpi=150, bbox_inches="tight")
+        print(f"Saved 6-panel plot: {fig_path}")
+
+    return fig
+
+
+def _shade_working_hours(
+    ax: plt.Axes,
+    timestamps: pd.Series,
+    working_hours: Tuple[float, float] = (8.0, 18.0),
+    color: str = "gold",
+    alpha: float = 0.10,
+    workdays: Tuple[int, ...] = (0, 1, 2, 3, 4),  # Mon-Fri
+) -> None:
+    """Shade daily working-hour windows on a time axis, excluding weekends by default."""
+    if timestamps is None or len(timestamps) == 0:
+        return
+
+    t0 = pd.to_datetime(timestamps.min())
+    t1 = pd.to_datetime(timestamps.max())
+    h_start, h_end = float(working_hours[0]), float(working_hours[1])
+
+    day0 = t0.floor("D")
+    day1 = t1.ceil("D")
+    days = pd.date_range(day0, day1, freq="D")
+
+    first = True
+    for d in days:
+        if d.dayofweek not in workdays:
+            continue
+
+        ws = d + pd.to_timedelta(h_start, unit="h")
+        we = d + pd.to_timedelta(h_end, unit="h")
+        if we <= ws:
+            we = we + pd.Timedelta(days=1)
+
+        left = max(ws, t0)
+        right = min(we, t1)
+        if right > left:
+            ax.axvspan(
+                left,
+                right,
+                color=color,
+                alpha=alpha,
+                lw=0,
+                label="Working hours" if first else None,
+            )
+            first = False
