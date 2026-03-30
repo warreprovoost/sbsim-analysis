@@ -79,6 +79,15 @@ PRESETS = {
         eval_training_mode="full",
         description="Full training with energy penalty — 100k steps, 7-day episodes, 1 eval episode",
     ),
+    "always_occ1": dict(
+        total_timesteps=100_000,
+        chunk_timesteps=5_000,
+        episode_days=7,
+        n_eval_episodes=1,
+        training_mode="always_occupied",
+        eval_training_mode="always_occupied",
+        description="7-day full run with constant occupancy=1.0 (no working-hours effect)",
+    ),
 }
 
 # ─────────────────────────────────────────────
@@ -88,7 +97,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Train SAC/TD3 on building HVAC.")
     parser.add_argument(
         "--mode",
-        choices=["mini", "short", "long", "long_eval1", "full", "full_eval1"],
+        choices=["mini", "short", "long", "long_eval1", "full", "full_eval1", "always_occ1"],
         default="short",
         help="Training preset to use.",
     )
@@ -109,6 +118,12 @@ def parse_args():
         type=str,
         default=None,
         help="Output directory. Defaults to results/<mode>_<algo>_<seed>.",
+    )
+    parser.add_argument(
+        "--n_envs",
+        type=int,
+        default=1,
+        help="Number of parallel envs (1=DummyVecEnv, >1=SubprocVecEnv with spawn).",
     )
     parser.add_argument(
         "--weather_csv",
@@ -199,6 +214,7 @@ def main():
         training_mode=preset["training_mode"],
         eval_training_mode=preset["eval_training_mode"],
         n_eval_episodes=preset["n_eval_episodes"],
+        n_envs=args.n_envs,
         wandb_run=wandb_run,
         wandb_finish=False,  # keep run alive for compare logging
     )

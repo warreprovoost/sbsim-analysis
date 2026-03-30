@@ -10,11 +10,15 @@ from stable_baselines3 import SAC
 from stable_baselines3 import TD3
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.env_util import make_vec_env
-from stable_baselines3.common.vec_env import SubprocVecEnv
+from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv
 from tqdm import tqdm
 import itertools
 from smart_control_analysis.baseline_controller import ThermostatBaselineController
-import wandb
+
+try:
+    import wandb
+except ImportError:
+    wandb = None
 
 from smart_control_analysis.action_wrappers import FixedActionsWrapper
 from smart_control_analysis.building_factory import building_factory, get_base_params
@@ -87,6 +91,35 @@ class TrainingProgressCallback(BaseCallback):
 
         return True
 
+
+def _make_env_worker(
+    building_factory_fn: Callable,
+    params: Dict[str, Any],
+    factory_kwargs: Dict[str, Any],
+    training_mode: Optional[str],
+    rank: int,
+    gpu_id: Optional[int] = None,
+
+) -> Callable:
+    """
+    Returns a picklable env factory for SubprocVecEnv.
+    Must be a top-level function, not a lambda or closure capturing self.
+    """
+    def _init():
+        if gpu_id is not None:
+            import os
+            os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+        kwargs = factory_kwargs.copy()
+        if training_mode is not None:
+            kwargs["training_mode"] = training_mode
+
+        _, env = building_factory_fn(params.copy(), **kwargs)
+        _apply_training_mode_overrides(env, training_mode)
+        return env
+
+    return _init
+
+
 class BuildingRLTrainer:
     """Train multiple RL agents (SAC/TD3/DDPG) on the building environment."""
 
@@ -121,9 +154,12 @@ class BuildingRLTrainer:
         )
         _, env = self.building_factory_fn(params, **kwargs)
 
+        _apply_training_mode_overrides(env, training_mode)
+
         if fixed_actions:
             env = FixedActionsWrapper(env, fixed=fixed_actions)
         return env
+
 
     def create_vec_env(
         self,
@@ -140,16 +176,22 @@ class BuildingRLTrainer:
             self.default_factory_kwargs, factory_kwargs, training_mode
         )
 
-        def make_env_fn():
-            return self.create_env(params=params, training_mode=training_mode)
+        env_fns = [
+            _make_env_worker(
+                building_factory_fn=self.building_factory_fn,
+                params=params.copy(),
+                factory_kwargs=kwargs,
+                training_mode=training_mode,
+                gpu_id = i % 2,
+                rank=i,
+            )
+            for i in range(n_envs)
+        ]
 
-        from stable_baselines3.common.env_util import make_vec_env
-        from stable_baselines3.common.vec_env import DummyVecEnv
-        return make_vec_env(
-            make_env_fn,
-            n_envs=n_envs,
-            vec_env_cls=DummyVecEnv,
-        )
+        if n_envs == 1:
+            return DummyVecEnv(env_fns)
+        else:
+            return SubprocVecEnv(env_fns, start_method="spawn")
 
 
     def train(
@@ -764,8 +806,8 @@ def run_rl_2024_setup(
     )
 
     if n_envs is None:
-        n_envs = _available_env_workers()
-        print("caling n_envs", n_envs)
+        n_envs = min(4, _available_env_workers())
+        print(f"Auto n_envs={n_envs}")
     print(f"Using n_envs={n_envs}")
 
     rng = np.random.default_rng(seed)
@@ -777,8 +819,8 @@ def run_rl_2024_setup(
         p = base.copy()
         p["start_timestamp"] = _sample_start_in_period(
             rng=rng,
-            start=train_period_start,   # FIX
-            end=train_period_end,       # FIX
+            start=train_period_start,
+            end=train_period_end,
             episode_days=episode_days,
             time_zone=base["time_zone"],
         ).isoformat()
@@ -801,7 +843,10 @@ def run_rl_2024_setup(
                 training_mode=training_mode,
             )
             if trainer.env is not None:
-                trainer.env.close()
+                try:
+                    trainer.env.close()
+                except Exception:
+                    pass
             trainer.env = new_env
             trainer.model.set_env(new_env)
             trainer.model.learn(
@@ -1267,7 +1312,7 @@ def _plot_episode_trace_6panel(
 
     # --- 1) Room temperature ---
     working_hours = (8.0, 18.0)
-    _shade_working_hours(ax_room, df["timestamp"], working_hours=working_hours)
+    # _shade_working_hours(ax_room, df["timestamp"], working_hours=working_hours)
     ax_room.plot(df["timestamp"], df["room_temp_c"],
                  label="Room temp (°C)", linewidth=2, color="tab:blue")
     ax_room.axhline(comfort_low_c,  color="green", linestyle="--", linewidth=1.2,
@@ -1413,3 +1458,17 @@ def _shade_working_hours(
                 label="Working hours" if first else None,
             )
             first = False
+
+def _apply_training_mode_overrides(env, training_mode: Optional[str]) -> None:
+    if training_mode != "always_occupied":
+        return
+
+    # 24/7 occupancy = 1.0, independent of working hours
+    if hasattr(env, "occupancy_model"):
+        env.occupancy_model = "constant"
+    if hasattr(env, "occupancy_per_zone"):
+        env.occupancy_per_zone = 1.0
+    if hasattr(env, "working_hours"):
+        env.working_hours = (0.0, 24.0)
+    if hasattr(env, "_build_occupancies"):
+        env.occupancies = env._build_occupancies(seed=None)

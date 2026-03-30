@@ -1,6 +1,7 @@
 from smart_control_analysis.custom_sbsim.mutable_schedule import MutableSetpointSchedule
 import pandas as pd
-from smart_control.simulator.weather_controller import WeatherController, ReplayWeatherController
+from smart_control.simulator.weather_controller import WeatherController
+from smart_control_analysis.custom_sbsim.fast_weather_controller import FastReplayWeatherController
 from typing import Any, Dict, Optional
 import pytz
 import warnings
@@ -101,7 +102,7 @@ def building_factory(
         weather_csv_path = os.path.expanduser(params.get("weather_csv_path", ""))
         if not weather_csv_path:
             raise ValueError("weather_source='replay' requires params['weather_csv_path']")
-        weather_controller = ReplayWeatherController(
+        weather_controller = FastReplayWeatherController(
             local_weather_path=weather_csv_path,
             convection_coefficient=params.get("convection_coefficient", 60.0),
         )
@@ -182,21 +183,22 @@ def get_base_params() -> dict:
         # Sim
         "time_step_sec": 300,
         "max_steps": int(7 * 24 * 3600 / 300),
+        "working_hours":  (0.0, 24.0),
 
 
         # Weather
         "outdoor_low_temp": -5,
         "outdoor_high_temp": 5,
         "convection_coefficient": 100.0,    # stronger outside exchange
-        "start_timestamp": "2024-01-16 06:00:00",
-        "time_zone": "America/Los_Angeles",
+        "start_timestamp": "2023-01-16 06:00:00",
+        "time_zone": "Europe/Oslo",
         "weather_source": "replay",
-        "weather_csv_path": "~/thesis/weather_data/2024.csv",
+        "weather_csv_path": "~/thesis/weather_data/oslo_weather_2023.csv",
 
 
         # Boiler
         "boiler_setpoint_celsius": 45,
-        "pump_head": 60000,
+        "pump_head": 6.1,
         "pump_efficiency": 1.0,
 
         # Air handler

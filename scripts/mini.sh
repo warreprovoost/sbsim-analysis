@@ -1,8 +1,8 @@
 #!/bin/bash -l
 #PBS -N rl_mini
 #PBS -l walltime=0:30:00
-#PBS -l mem=8gb
-#PBS -l nodes=1:ppn=2:gpus=1
+#PBS -l mem=32gb
+#PBS -l nodes=1:ppn=4:gpus=2
 #PBS -o /user/gent/453/vsc45342/thesis/logs/mini.o$PBS_JOBID
 #PBS -e /user/gent/453/vsc45342/thesis/logs/mini.e$PBS_JOBID
 #PBS -m abe
@@ -23,6 +23,6 @@ mkdir -p /user/gent/453/vsc45342/thesis/results
 mkdir -p /user/gent/453/vsc45342/thesis/logs
 
 cd ~/thesis/sbsim-analysis/
-~/.conda/envs/sbsim/bin/python scripts/train_rl.py --mode mini --algo sac --seed 42 --unique_run
+~/.conda/envs/sbsim/bin/python scripts/train_rl.py --mode mini --algo sac --seed 42 --unique_run --n_envs 2
 
 echo "Job completed successfully"

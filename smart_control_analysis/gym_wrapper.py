@@ -20,6 +20,13 @@ class _AlwaysZeroOccupancy:
     def average_zone_occupancy(self, zone_id: str, start_time: Any, end_time: Any) -> float:
         return 0.0
 
+class _ConstantOccupancy:
+    """Constant occupancy independent of time/window."""
+    def __init__(self, value: float = 1.0):
+        self.value = float(value)
+
+    def average_zone_occupancy(self, zone_id: str, start_time: Any, end_time: Any) -> float:
+        return self.value
 
 class BuildingGymEnv(gym.Env):
     """
@@ -192,8 +199,8 @@ class BuildingGymEnv(gym.Env):
         ah_heat_sp = supply_air_sp - 0.5
         ah_cool_sp = supply_air_sp + 0.5
 
-        # boiler: [-1,1] -> [318.15, 338.15] K [20°C, 65°C]
-        boiler_sp = 316.65 + boiler_action * 22.5   # center=43.5°C, range=[21°C, 66°C]
+        # boiler: [-1,1] -> [36°C, 50.5°C, 65°C]
+        boiler_sp = 323.65 + boiler_action * 14.5
 
         # clamp boiler to at least outside air temp (the sim requires it)
         ambient_temp_k = float(
@@ -202,7 +209,7 @@ class BuildingGymEnv(gym.Env):
                 self.sim.current_timestamp,
             )
         )
-        boiler_sp = max(boiler_sp, ambient_temp_k + 1.0)  # at least 1°C above outside
+        boiler_sp = max(boiler_sp, ambient_temp_k + 1.0, ah_heat_sp + 1.0)  # at least 1°C above outside and air_supply
 
         action_timestamp = self.sim.current_timestamp
 
@@ -250,7 +257,6 @@ class BuildingGymEnv(gym.Env):
         truncated = self.step_count >= self.max_steps
 
         info: Dict = {
-            "raw_reward_obj":       r_obj,
             "comfort_penalty":      float(comfort_penalty),
             "energy_rate":          float(energy_rate),
             "blower_rate":          self._last_energy_components["blower_rate"],
@@ -282,7 +288,7 @@ class BuildingGymEnv(gym.Env):
             # old: occ = float(occ_by_zone.get(zone_id, 0.0))
             occ = self._occupancy_for_reward_zone(zone_id, occ_by_zone)
 
-            w = occ ** 0.5
+            w = 1.0 if occ > 0.0 else 0.0 # just binary no sqrt
             weighted_violation_sum += w * temp_violation
             weight_sum += w
 
@@ -366,7 +372,6 @@ class BuildingGymEnv(gym.Env):
         for i, _zone_id in enumerate(self.zone_ids):
             if self.occupancy_model == "step":
                 # Step-function occupancy (deterministic schedule)
-                # Convert hours to pd.Timedelta
                 work_start_hour, work_end_hour = self.working_hours
                 default_kwargs = {
                     "work_start_time": pd.Timedelta(hours=work_start_hour),
@@ -376,6 +381,8 @@ class BuildingGymEnv(gym.Env):
                 }
                 default_kwargs.update(self.occupancy_kwargs)
                 occs.append(StepFunctionOccupancy(**default_kwargs))
+            elif self.occupancy_model in {"constant", "always_one"}:
+                occs.append(_ConstantOccupancy(value=self.occupancy_per_zone))
             else:
                 # Randomized occupancy (stochastic)
                 default_kwargs = {
@@ -388,8 +395,16 @@ class BuildingGymEnv(gym.Env):
                     "seed": (None if base_seed is None else base_seed + i),
                     "time_zone": self.time_zone,
                 }
+
+                work_start_hour, work_end_hour = self.working_hours
+                default_kwargs = { # OVERWRITE
+                    "work_start_time": pd.Timedelta(hours=work_start_hour),
+                    "work_end_time": pd.Timedelta(hours=work_end_hour),
+                    "work_occupancy": self.occupancy_per_zone,
+                    "nonwork_occupancy": 0.0,
+                }
                 default_kwargs.update(self.occupancy_kwargs)
-                occs.append(RandomizedArrivalDepartureOccupancy(**default_kwargs))
+                occs.append(StepFunctionOccupancy(**default_kwargs)) # DON'T FORGET, I disabled RandomizedArrivalDepartureOccupancy
 
         return occs
 
