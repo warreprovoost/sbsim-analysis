@@ -19,7 +19,7 @@ THESIS_ROOT = os.path.expanduser("~/thesis")
 sys.path.insert(0, os.path.join(THESIS_ROOT, "sbsim-analysis"))
 sys.path.insert(0, os.path.join(THESIS_ROOT, "sbsim"))
 
-from smart_control_analysis.rl_trainer import run_rl_2024_setup, compare_rl_vs_baseline_2024
+from smart_control_analysis.rl_trainer import run_rl_setup, compare_rl_vs_baseline
 
 # ─────────────────────────────────────────────
 # Presets
@@ -30,8 +30,8 @@ PRESETS = {
         chunk_timesteps=200,
         episode_days=2,
         n_eval_episodes=1,
-        training_mode="comfort_only",
-        eval_training_mode="comfort_only",
+        training_mode="full",
+        eval_training_mode="full",
         description="mini test",
     ),
     "short": dict(
@@ -39,17 +39,17 @@ PRESETS = {
         chunk_timesteps=1_000,
         episode_days=3,
         n_eval_episodes=2,
-        training_mode="comfort_only",
-        eval_training_mode="comfort_only",
-        description="Quick smoke test — 5k steps, comfort_only, 3-day episodes",
+        training_mode="full",
+        eval_training_mode="fulll",
+        description="Quick smoke test — 5k steps, full, 3-day episodes",
     ),
     "long": dict(
         total_timesteps=100_000,
         chunk_timesteps=5_000,
         episode_days=7,
         n_eval_episodes=5,
-        training_mode="comfort_only",
-        eval_training_mode="comfort_only",
+        training_mode="full",
+        eval_training_mode="full",
         description="Full comfort training — 100k steps, 7-day episodes",
     ),
     "long_eval1": dict(
@@ -57,12 +57,12 @@ PRESETS = {
         chunk_timesteps=5_000,
         episode_days=7,
         n_eval_episodes=1,
-        training_mode="comfort_only",
-        eval_training_mode="comfort_only",
+        training_mode="full",
+        eval_training_mode="full",
         description="Full comfort training — 100k steps, 7-day episodes, 1 eval episode",
     ),
     "full": dict(
-        total_timesteps=100_000,
+        total_timesteps=50_000,
         chunk_timesteps=5_000,
         episode_days=7,
         n_eval_episodes=5,
@@ -71,10 +71,10 @@ PRESETS = {
         description="Full training with energy penalty — 100k steps, 7-day episodes",
     ),
     "full_eval1": dict(
-        total_timesteps=100_000,
+        total_timesteps=500_000,
         chunk_timesteps=5_000,
         episode_days=7,
-        n_eval_episodes=1,
+        n_eval_episodes=5,
         training_mode="full",
         eval_training_mode="full",
         description="Full training with energy penalty — 100k steps, 7-day episodes, 1 eval episode",
@@ -128,7 +128,7 @@ def parse_args():
     parser.add_argument(
         "--weather_csv",
         type=str,
-        default="~/thesis/weather_data/2024.csv",
+        default="~/thesis/weather_data/oslo_weather_multiyear.csv",
         help="Path to weather CSV.",
     )
     parser.add_argument(
@@ -203,7 +203,7 @@ def main():
 
     # ── Training ──
     print("\n--- TRAINING ---")
-    res = run_rl_2024_setup(
+    res = run_rl_setup(
         weather_csv_path=weather_csv,
         algo=args.algo,
         total_timesteps=preset["total_timesteps"],
@@ -227,7 +227,7 @@ def main():
     if not args.no_compare:
         print("\n--- RL vs BASELINE COMPARISON ---")
         compare_dir = os.path.join(output_dir, "compare")
-        compare_results = compare_rl_vs_baseline_2024(
+        compare_results = compare_rl_vs_baseline(
             trainer=res["trainer"],
             output_dir=compare_dir,
             n_episodes=preset["n_eval_episodes"],

@@ -1,11 +1,8 @@
 import numpy as np
 from smart_control.simulator.simulator_flexible_floor_plan import SimulatorFlexibleGeometries
 
-try:
-    from numba import njit
-    _NUMBA_AVAILABLE = True
-except ImportError:
-    _NUMBA_AVAILABLE = False
+from numba import njit
+
 
 
 # ---------------------------------------------------------------------------
@@ -13,89 +10,52 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 def _make_gs_kernel():
-    """Return a JIT-compiled Gauss-Seidel sweep function if Numba is available,
-    otherwise return a plain numpy fallback that uses the same loop structure."""
+    """Return a JIT-compiled Gauss-Seidel sweep function with Numba"""
 
-    if _NUMBA_AVAILABLE:
-        @njit(cache=True)
-        def _gs_sweep(T, last_temp, input_q,
-                      interior, corner, edge,
-                      w_up, w_down, w_left, w_right,
-                      c_self, c_amb_h, c_q,
-                      denom_base, denom_h,
-                      ambient_temperature, convection_coefficient,
-                      nrows, ncols):
-            """One full Gauss-Seidel sweep in row-major order (matches original).
 
-            Updates T in-place.  Returns max |delta| across all cells.
-            """
-            max_delta = 0.0
-            h = convection_coefficient
-            for x in range(nrows):
-                for y in range(ncols):
-                    if not (interior[x, y] or corner[x, y] or edge[x, y]):
-                        # exterior — fix to ambient
-                        old = T[x, y]
-                        T[x, y] = ambient_temperature
-                        d = abs(T[x, y] - old)
-                        if d > max_delta:
-                            max_delta = d
-                        continue
+    @njit(cache=True)
+    def _gs_sweep(T, last_temp, input_q,
+                    interior, corner, edge,
+                    w_up, w_down, w_left, w_right,
+                    c_self, c_amb_h, c_q,
+                    denom_base, denom_h,
+                    ambient_temperature, convection_coefficient,
+                    nrows, ncols):
+        """One full Gauss-Seidel sweep in row-major order (matches original).
 
-                    denom = denom_base[x, y] + h * denom_h[x, y]
-
-                    n_nbr = (w_up[x, y]    * T[x - 1, y] +
-                             w_down[x, y]  * T[x + 1, y] +
-                             w_left[x, y]  * T[x, y - 1] +
-                             w_right[x, y] * T[x, y + 1])
-
-                    n_amb  = h * c_amb_h[x, y] * ambient_temperature
-                    n_self = c_self[x, y] * last_temp[x, y]
-                    n_q    = c_q[x, y] * input_q[x, y]
-
-                    new_val = (n_nbr + n_amb + n_self + n_q) / denom
-                    d = abs(new_val - T[x, y])
+        Updates T in-place.  Returns max |delta| across all cells.
+        """
+        max_delta = 0.0
+        h = convection_coefficient
+        for x in range(nrows):
+            for y in range(ncols):
+                if not (interior[x, y] or corner[x, y] or edge[x, y]):
+                    # exterior — fix to ambient
+                    old = T[x, y]
+                    T[x, y] = ambient_temperature
+                    d = abs(T[x, y] - old)
                     if d > max_delta:
                         max_delta = d
-                    T[x, y] = new_val
+                    continue
 
-            return max_delta
+                denom = denom_base[x, y] + h * denom_h[x, y]
 
-    else:
-        def _gs_sweep(T, last_temp, input_q,
-                      interior, corner, edge,
-                      w_up, w_down, w_left, w_right,
-                      c_self, c_amb_h, c_q,
-                      denom_base, denom_h,
-                      ambient_temperature, convection_coefficient,
-                      nrows, ncols):
-            """Plain Python fallback (same logic, no JIT)."""
-            max_delta = 0.0
-            h = convection_coefficient
-            for x in range(nrows):
-                for y in range(ncols):
-                    if not (interior[x, y] or corner[x, y] or edge[x, y]):
-                        old = T[x, y]
-                        T[x, y] = ambient_temperature
-                        d = abs(T[x, y] - old)
-                        if d > max_delta:
-                            max_delta = d
-                        continue
+                n_nbr = (w_up[x, y]    * T[x - 1, y] +
+                            w_down[x, y]  * T[x + 1, y] +
+                            w_left[x, y]  * T[x, y - 1] +
+                            w_right[x, y] * T[x, y + 1])
 
-                    denom = denom_base[x, y] + h * denom_h[x, y]
-                    n_nbr = (w_up[x, y]    * T[x - 1, y] +
-                             w_down[x, y]  * T[x + 1, y] +
-                             w_left[x, y]  * T[x, y - 1] +
-                             w_right[x, y] * T[x, y + 1])
-                    n_amb  = h * c_amb_h[x, y] * ambient_temperature
-                    n_self = c_self[x, y] * last_temp[x, y]
-                    n_q    = c_q[x, y] * input_q[x, y]
-                    new_val = (n_nbr + n_amb + n_self + n_q) / denom
-                    d = abs(new_val - T[x, y])
-                    if d > max_delta:
-                        max_delta = d
-                    T[x, y] = new_val
-            return max_delta
+                n_amb  = h * c_amb_h[x, y] * ambient_temperature
+                n_self = c_self[x, y] * last_temp[x, y]
+                n_q    = c_q[x, y] * input_q[x, y]
+
+                new_val = (n_nbr + n_amb + n_self + n_q) / denom
+                d = abs(new_val - T[x, y])
+                if d > max_delta:
+                    max_delta = d
+                T[x, y] = new_val
+
+        return max_delta
 
     return _gs_sweep
 
@@ -103,7 +63,7 @@ def _make_gs_kernel():
 _gs_sweep = _make_gs_kernel()
 
 
-class DirectVavTFSimulator(SimulatorFlexibleGeometries):
+class FastCPUSimulator(SimulatorFlexibleGeometries):
     """SimulatorFlexibleGeometries variant for direct RL control.
 
     Changes vs base class:
@@ -177,11 +137,11 @@ class DirectVavTFSimulator(SimulatorFlexibleGeometries):
                 if n <= 1:
                     continue  # exterior: handled separately in the sweep
 
-                def _set_dir(nx, ny, w):
-                    if   nx == x - 1: w_up[x, y]    = w
-                    elif nx == x + 1: w_down[x, y]  = w
-                    elif ny == y - 1: w_left[x, y]  = w
-                    elif ny == y + 1: w_right[x, y] = w
+                def _set_dir(nx, ny, w, _x=x, _y=y):
+                    if   nx == _x - 1: w_up[_x, _y]    = w
+                    elif nx == _x + 1: w_down[_x, _y]  = w
+                    elif ny == _y - 1: w_left[_x, _y]  = w
+                    elif ny == _y + 1: w_right[_x, _y] = w
 
                 if n == 2:  # corner
                     t0 = t0_ec[x, y]; ki = k[x, y]

@@ -33,6 +33,8 @@ class ThermostatBaselineController:
 
 
     def _is_working_hours(self, timestamp) -> bool:
+
+        return True # FORCE every hour of every day you work
         """Check if current time is within working hours."""
         hour = timestamp.hour + timestamp.minute / 60.0
         start_hour, end_hour = self.working_hours
@@ -49,8 +51,7 @@ class ThermostatBaselineController:
         Parameters
         ----------
         obs : np.ndarray
-            Observation from env._get_obs()
-            Structure: [temps (n), occupancies (n), hour, supply_air_sp, boiler_sp, ambient]
+            Observation from env._get_obs() — only zone temps (first n_zones) are used directly.
         env : BuildingGymEnv
             Environment reference (to access zone temps and timestamps)
 
@@ -62,9 +63,9 @@ class ThermostatBaselineController:
         n_zones = env.n_zones
         timestamp = env.sim.current_timestamp
 
-        # Parse observation
+        # Read zone temps and occupancies directly from env (obs layout has changed)
         zone_temps_k = obs[:n_zones] + 273.15  # convert back to K
-        zone_occupancies = obs[n_zones:2*n_zones]
+        zone_occupancies = np.ones(n_zones, dtype=np.float32)  # always occupied (working hours forced)
 
         action = np.zeros(3 + n_zones, dtype=np.float32)
 

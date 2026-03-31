@@ -10,7 +10,7 @@ from stable_baselines3 import SAC
 from stable_baselines3 import TD3
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.env_util import make_vec_env
-from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv
+from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv, VecNormalize
 from tqdm import tqdm
 import itertools
 from smart_control_analysis.baseline_controller import ThermostatBaselineController
@@ -85,6 +85,14 @@ class TrainingProgressCallback(BaseCallback):
                 payload["train/energy_rate_mean"] = float(np.mean(step_energy))
             if step_comfort:
                 payload["train/comfort_penalty_mean"] = float(np.mean(step_comfort))
+            # Log raw reward_total from info (not VecNormalize-scaled episode reward)
+            step_rewards = [
+                float(info["reward_total"])
+                for info in infos
+                if "reward_total" in info
+            ]
+            if step_rewards:
+                payload["train/reward_mean"] = float(np.mean(step_rewards))
             if payload:
                 self.wandb_run.log(payload, step=current_step)
             self._last_logged_step = current_step
@@ -136,6 +144,7 @@ class BuildingRLTrainer:
         self.model = None
         self.callback = None
         self.env = None
+        self.vec_normalize: Optional[VecNormalize] = None
         self.algo_name = None
         self.wandb_run = None
 
@@ -189,9 +198,12 @@ class BuildingRLTrainer:
         ]
 
         if n_envs == 1:
-            return DummyVecEnv(env_fns)
+            vec_env = DummyVecEnv(env_fns)
         else:
-            return SubprocVecEnv(env_fns, start_method="spawn")
+            vec_env = SubprocVecEnv(env_fns, start_method="spawn")
+        normalized = VecNormalize(vec_env, norm_obs=True, norm_reward=True, clip_obs=10.0)
+        self.vec_normalize = normalized
+        return normalized
 
 
     def train(
@@ -542,10 +554,15 @@ class BuildingRLTrainer:
         return csv_path
 
     def save_model(self, filepath: str):
-        """Save trained model."""
+        """Save trained model and VecNormalize stats."""
         if self.model is None:
             raise ValueError("No model to save. Train first.")
         self.model.save(filepath)
+        # Also save VecNormalize statistics so eval uses the same obs normalization
+        if isinstance(self.env, VecNormalize):
+            norm_path = filepath + "_vecnormalize.pkl"
+            self.env.save(norm_path)
+            print(f"VecNormalize stats saved to {norm_path}")
         print(f"Model saved to {filepath}")
 
     def load_model(self, filepath: str, algo: str):
@@ -561,6 +578,13 @@ class BuildingRLTrainer:
             raise ValueError(f"Unknown algo: {algo}")
         self.algo_name = algo
         print(f"Model loaded from {filepath}")
+
+    def load_vec_normalize(self, filepath: str):
+        """Load VecNormalize stats saved alongside the model (for correct eval obs normalization)."""
+        import pickle
+        with open(filepath, "rb") as f:
+            self.vec_normalize = pickle.load(f)
+        print(f"VecNormalize stats loaded from {filepath}")
 
     def close(self):
         """Close environments."""
@@ -707,6 +731,22 @@ def _sample_start_in_period(
     return s + (latest - s) * frac
 
 
+def _wrap_eval_env(raw_env, trainer: BuildingRLTrainer):
+    """Wrap a single eval env with VecNormalize using training stats (no stat updates)."""
+    if trainer.vec_normalize is None:
+        return raw_env
+    vec = DummyVecEnv([lambda e=raw_env: e])
+    src = trainer.vec_normalize
+    eval_norm = VecNormalize(vec, norm_obs=src.norm_obs, norm_reward=False,
+                             clip_obs=src.clip_obs, clip_reward=src.clip_reward,
+                             gamma=src.gamma, epsilon=src.epsilon)
+    # Copy running statistics from training env
+    eval_norm.obs_rms = src.obs_rms
+    eval_norm.ret_rms = src.ret_rms
+    eval_norm.training = False  # freeze — don't update stats during eval
+    return eval_norm
+
+
 def _evaluate_period_random_starts(
     trainer: BuildingRLTrainer,
     params_template: Dict[str, Any],
@@ -731,17 +771,25 @@ def _evaluate_period_random_starts(
             time_zone=p["time_zone"],
         ).isoformat()
 
-        env = trainer.create_env(params=p, factory_kwargs=factory_kwargs)
+        raw_env = trainer.create_env(params=p, factory_kwargs=factory_kwargs)
+        env = _wrap_eval_env(raw_env, trainer)
         obs, _ = env.reset()
         done = False
         ep_r = 0.0
         ep_l = 0
         while not done:
             action, _ = trainer.model.predict(obs, deterministic=deterministic)
-            obs, reward, terminated, truncated, _ = env.step(action)
+            # _wrap_eval_env returns VecEnv — step returns arrays; unwrap to scalar
+            if hasattr(env, "num_envs"):
+                obs, reward, terminated, truncated, _ = env.step(action)
+                obs = obs[0]
+                reward = float(reward[0])
+                done = bool(terminated[0]) or bool(truncated[0])
+            else:
+                obs, reward, terminated, truncated, _ = env.step(action)
+                done = terminated or truncated
             ep_r += float(reward)
             ep_l += 1
-            done = terminated or truncated
         env.close()
 
         rewards.append(ep_r)
@@ -761,7 +809,7 @@ def _available_env_workers() -> int:
         return max(1, len(os.sched_getaffinity(0)))
     return max(1, int(os.cpu_count() or 1))
 
-def run_rl_2024_setup(
+def run_rl_setup(
     weather_csv_path: str,
     algo: str = "sac",
     total_timesteps: int = 300_000,
@@ -774,12 +822,12 @@ def run_rl_2024_setup(
     eval_training_mode: Optional[str] = None,
     n_eval_episodes: int = 8,
     wandb_finish: bool = True,
-    train_period_start: str = "2024-01-16",
-    train_period_end: str = "2024-08-01",
-    val_period_start: str = "2024-08-01",
-    val_period_end: str = "2024-10-01",
-    test_period_start: str = "2024-10-01",
-    test_period_end: str = "2024-12-01",
+    train_period_start: str = "2019-11-01",
+    train_period_end: str = "2023-11-01",
+    val_period_start: str = "2023-11-01",
+    val_period_end: str = "2023-11-30",
+    test_period_start: str = "2023-11-30",
+    test_period_end: str = "2023-12-31",
     **train_kwargs,
 ) -> Dict[str, Any]:
     os.makedirs(output_dir, exist_ok=True)
@@ -859,11 +907,14 @@ def run_rl_2024_setup(
         trained += chunk
         print(f"Trained {trained}/{total_timesteps} timesteps")
 
+    trainer.save_model(os.path.join(output_dir, f"{algo}_2024_model"))
+    trainer.save_results(output_dir)
+
     val_results = _evaluate_period_random_starts(
         trainer=trainer,
         params_template=base,
-        period_start=val_period_start,    # FIX
-        period_end=val_period_end,        # FIX
+        period_start=val_period_start,
+        period_end=val_period_end,
         n_episodes=n_eval_episodes,
         episode_days=episode_days,
         deterministic=True,
@@ -873,17 +924,14 @@ def run_rl_2024_setup(
     test_results = _evaluate_period_random_starts(
         trainer=trainer,
         params_template=base,
-        period_start=test_period_start,   # FIX
-        period_end=test_period_end,       # FIX
+        period_start=test_period_start,
+        period_end=test_period_end,
         n_episodes=n_eval_episodes,
         episode_days=episode_days,
         deterministic=True,
         seed=seed + 2,
         factory_kwargs={"training_mode": eval_training_mode},
     )
-
-    trainer.save_model(os.path.join(output_dir, f"{algo}_2024_model"))
-    trainer.save_results(output_dir)
 
     summary = {
         "algo": algo,
@@ -1049,11 +1097,16 @@ def _compare_period_rl_vs_baseline(
         max_steps = int(episode_days * 24 * 3600 / p["time_step_sec"])
         p["max_steps"] = max_steps
 
-        # RL episode
+        # RL episode — normalize obs using training VecNormalize stats before predict
         env_rl = trainer.create_env(params=p, training_mode=training_mode)
+        _vn = trainer.vec_normalize  # may be None if no VecNormalize was used
+        def _rl_policy(obs, env, _det=deterministic, _vn=_vn):
+            if _vn is not None:
+                obs = _vn.normalize_obs(obs)
+            return trainer.model.predict(obs, deterministic=_det)[0]
         rl_df, rl_m, comfort_band_c = _run_episode_trace(
             env_rl,
-            lambda obs, env, _det=deterministic: trainer.model.predict(obs, deterministic=_det)[0],
+            _rl_policy,
             "rl",
             seed=ep,
         )
@@ -1078,12 +1131,12 @@ def _compare_period_rl_vs_baseline(
         b_df.to_csv(os.path.join(period_dir, f"episode_{ep:02d}_baseline_trace.csv"), index=False)
 
         if ep < n_plot_episodes:
-            _plot_episode_trace_4panel(
+            _plot_episode_trace_6panel(
                 rl_df, comfort_band_c,
                 title=f"{period_name.upper()} Episode {ep} - RL",
                 fig_path=os.path.join(period_dir, f"episode_{ep:02d}_rl_plot.png"),
             )
-            _plot_episode_trace_4panel(
+            _plot_episode_trace_6panel(
                 b_df, comfort_band_c,
                 title=f"{period_name.upper()} Episode {ep} - Baseline",
                 fig_path=os.path.join(period_dir, f"episode_{ep:02d}_baseline_plot.png"),
@@ -1138,7 +1191,7 @@ def _compare_period_rl_vs_baseline(
     return df, summary
 
 
-def compare_rl_vs_baseline_2024(
+def compare_rl_vs_baseline(
     trainer: BuildingRLTrainer,
     output_dir: str,
     n_episodes: int = 8,
@@ -1149,13 +1202,13 @@ def compare_rl_vs_baseline_2024(
     n_plot_episodes: int = 2,
     verbose: bool = True,
     # ADD: explicit period control
-    val_period_start: str = "2024-08-01",
-    val_period_end: str = "2024-10-01",
-    test_period_start: str = "2024-10-01",
-    test_period_end: str = "2024-12-01",
+    val_period_start: str = "2023-11-01",
+    val_period_end: str = "2023-11-30",
+    test_period_start: str = "2023-11-30",
+    test_period_end: str = "2023-12-31",
 ) -> Dict[str, Any]:
     """
-    Compare trained RL policy vs thermostat baseline on 2024 val/test splits.
+    Compare trained RL policy vs thermostat baseline on winter val/test splits.
     Saves per-episode traces, metrics CSVs, and 4-panel plots.
     """
     if trainer.model is None:

@@ -1,7 +1,7 @@
 import numpy as np
 
 from smart_control_analysis.building_factory import building_factory, get_base_params
-from smart_control_analysis.custom_sbsim.direct_vav_tf_simulator import DirectVavTFSimulator
+from smart_control_analysis.custom_sbsim.fast_cpu_simulator import FastCPUSimulator
 
 
 
@@ -9,7 +9,7 @@ def run_vav_check() -> dict:
     params = get_base_params()
     sim, env = building_factory(params)
 
-    assert isinstance(sim, DirectVavTFSimulator), f"Unexpected simulator: {type(sim)}"
+    assert isinstance(sim, FastCPUSimulator), f"Unexpected simulator: {type(sim)}"
 
     reset_out = env.reset()
     _obs, _info = reset_out if isinstance(reset_out, tuple) else (reset_out, {})

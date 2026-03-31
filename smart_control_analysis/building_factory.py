@@ -10,12 +10,12 @@ import os
 
 from smart_control_analysis.gym_wrapper import BuildingGymEnv
 from smart_control.simulator.air_handler import AirHandler
-from smart_control.simulator.boiler import Boiler
+from smart_control_analysis.custom_sbsim.safe_boiler import SafeBoiler
 from smart_control.simulator.building import FloorPlanBasedBuilding
 from smart_control.simulator.building import MaterialProperties
 from smart_control.simulator.hvac_floorplan_based import FloorPlanBasedHvac
 from smart_control.simulator.setpoint_schedule import SetpointSchedule
-from smart_control_analysis.custom_sbsim.direct_vav_tf_simulator import DirectVavTFSimulator
+from smart_control_analysis.custom_sbsim.fast_cpu_simulator import FastCPUSimulator
 
 
 def building_factory(
@@ -33,7 +33,7 @@ def building_factory(
     import numpy as np
 
     sim_tz = params.get("time_zone", "America/Los_Angeles")
-    start_ts = pd.Timestamp(params.get("start_timestamp", "2024-01-15 06:00:00"))
+    start_ts = pd.Timestamp(params.get("start_timestamp", "2023-01-15 06:00:00"))
     if start_ts.tzinfo is None:
         start_ts = start_ts.tz_localize(sim_tz)
 
@@ -113,9 +113,9 @@ def building_factory(
             convection_coefficient=params.get("convection_coefficient", 60.0),
         )
 
-    boiler = Boiler(
+    boiler = SafeBoiler(
         reheat_water_setpoint=273.15 + params.get("boiler_setpoint_celsius", 55),
-        water_pump_differential_head=params.get("pump_head", 60000),
+        water_pump_differential_head=params.get("pump_head", 6.1),
         water_pump_efficiency=params.get("pump_efficiency", 1.0),
     )
 
@@ -148,7 +148,7 @@ def building_factory(
         zone_identifier=["room_1"],
     )
 
-    building_sim = DirectVavTFSimulator(
+    building_sim = FastCPUSimulator(
         building=building,
         hvac=hvac,
         weather_controller=weather_controller,
@@ -165,6 +165,15 @@ def building_factory(
     elif training_mode == "full":
         occupancy_model = "randomized"
 
+    # Peak energy estimate from first principles (all at max VAV settings):
+    # Boiler gas: flow * Cp_water * (boiler_sp - supply_air_sp)
+    _delta_t = params.get("boiler_setpoint_celsius", 45) - params.get("ah_heating_setpoint_celsius", 18)
+    _peak_boiler_w = params.get("vav_reheat_flow", 0.001) * 4186.0 * max(_delta_t, 1.0)
+    # Blower: actual VAV flow (not rated max) * fan_pressure / fan_efficiency
+    _peak_blower_w = (params.get("fan_pressure", 800) * params.get("vav_max_flow", 0.01)
+                      / params.get("fan_efficiency", 0.7))
+    _energy_norm = _peak_boiler_w + _peak_blower_w  # W — ~124 W for default params
+
     env = BuildingGymEnv(
         sim=building_sim,
         time_zone=sim_tz,
@@ -173,6 +182,7 @@ def building_factory(
         working_hours=params.get("working_hours", (8.0, 18.0)),
         max_steps=params.get("max_steps", None),
         occupancy_per_zone=params.get("occupancy_per_zone", 10.0),
+        energy_norm=_energy_norm,
     )
     return building_sim, env
 
@@ -189,17 +199,17 @@ def get_base_params() -> dict:
         # Weather
         "outdoor_low_temp": -5,
         "outdoor_high_temp": 5,
-        "convection_coefficient": 100.0,    # stronger outside exchange
+        "convection_coefficient": 50.0,    # stronger outside exchange
         "start_timestamp": "2023-01-16 06:00:00",
         "time_zone": "Europe/Oslo",
         "weather_source": "replay",
-        "weather_csv_path": "~/thesis/weather_data/oslo_weather_2023.csv",
+        "weather_csv_path": "~/thesis/weather_data/oslo_weather_multiyear.csv",
 
 
         # Boiler
         "boiler_setpoint_celsius": 45,
         "pump_head": 6.1,
-        "pump_efficiency": 1.0,
+        "pump_efficiency": 0.65,
 
         # Air handler
         "recirculation": 0.7,
@@ -210,8 +220,8 @@ def get_base_params() -> dict:
         "max_airflow": 8.67,
 
         # VAV
-        "vav_max_flow": 1.4, # this is flow_rate_demand when vav is turned 'on'
-        "vav_reheat_flow": 0.4, # this is reheat_demand when vav is turned 'on'
+        "vav_max_flow": 0.01, # this is flow_rate_demand when vav is turned 'on'
+        "vav_reheat_flow": 0.001, # this is reheat_demand when vav is turned 'on'
 
         # Building geometry
         "cv_size_cm": 25.0,
@@ -230,7 +240,7 @@ def get_base_params() -> dict:
         "inside_wall_conductivity": 1.4,
 
         # Material properties - exterior wall
-        "exterior_wall_density": 150,
-        "exterior_wall_heat_capacity": 300,
-        "exterior_wall_conductivity": 8.0,
+        "exterior_wall_density": 800,
+        "exterior_wall_heat_capacity": 840,
+        "exterior_wall_conductivity": 2.0,
     }

@@ -1,7 +1,7 @@
 #!/bin/bash -l
 #PBS -N rl_full
-#PBS -l walltime=16:00:00
-#PBS -l mem=16gb
+#PBS -l walltime=1:00:00
+#PBS -l mem=12gb
 #PBS -l nodes=1:ppn=2:gpus=1
 #PBS -o /user/gent/453/vsc45342/thesis/logs/full.o$PBS_JOBID
 #PBS -e /user/gent/453/vsc45342/thesis/logs/full.e$PBS_JOBID
@@ -23,6 +23,6 @@ mkdir -p /user/gent/453/vsc45342/thesis/results
 mkdir -p /user/gent/453/vsc45342/thesis/logs
 
 cd ~/thesis/sbsim-analysis/
-~/.conda/envs/sbsim/bin/python scripts/train_rl.py --mode full --algo sac --seed 42 --unique_run
+~/.conda/envs/sbsim/bin/python scripts/train_rl.py --mode full --algo sac --seed 42 --unique_run --weather_csv /user/gent/453/vsc45342/thesis/weather_data/oslo_weather_multiyear.csv
 
 echo "Job completed successfully"

@@ -51,12 +51,14 @@ class BuildingGymEnv(gym.Env):
         occupancy_model: str = "randomized",   # "randomized" or "step"
         occupancy_per_zone: float = 10.0,
         occupancy_kwargs: Optional[Dict[str, Any]] = None,
+        energy_norm: float = 500.0,  # W — expected peak *total* energy for this building
     ):
         super().__init__()
         self.sim = sim
         self.time_zone = time_zone
         # Default to steps for 24h
         self.max_steps = max_steps if max_steps is not None else (24 * 60 * 60) // self.sim.time_step_sec
+        self.step_count=  0
 
         self.comfort_band_k = comfort_band_k
         self.working_hours = working_hours
@@ -70,6 +72,10 @@ class BuildingGymEnv(gym.Env):
             "boiler_gas_rate": float("nan"),
             "pump_rate": float("nan"),
         }
+        # Single running-max norm for total energy (W).
+        # Seeded from energy_norm so boiler/blower/AH absolute costs are preserved.
+        # EMA slowly raises the norm if the sim regularly exceeds the initial estimate.
+        self._energy_norm: float = float(energy_norm)  # fixed — set from physics in building_factory
 
         zone_temps_dict = self.sim.building.get_zone_average_temps()
         self.zone_ids = sorted(zone_temps_dict.keys())  # e.g., ["room_1", "room_2"]
@@ -79,6 +85,8 @@ class BuildingGymEnv(gym.Env):
 
         self._last_shared_damper_cmd = np.float32(0.5)
         self._last_reheat_cmds = np.zeros(self.n_zones, dtype=np.float32)
+        self._last_ambient_temp_c: float = 0.0  # for ambient trend feature
+        self._last_action: Optional[np.ndarray] = None  # for action smoothness penalty
 
 
         # action: [ah_supply, boiler, vav_1_damper, vav_2_damper, ..., vav_1_reheat, vav_2_reheat, ...]
@@ -90,7 +98,9 @@ class BuildingGymEnv(gym.Env):
         )
         self.observation_space = spaces.Box(
             low=-1e3, high=1e4,
-            shape=(self.n_zones * 3 + 9,),
+            # temps(n) + temp_errors(n) + reheat_cmds(n) + time_feats(5)
+            # + [supply_air_sp, boiler_sp, ambient, ambient_trend, damper](5)
+            shape=(self.n_zones * 3 + 10,),
             dtype=np.float32,
         )
         # convenience references
@@ -133,44 +143,41 @@ class BuildingGymEnv(gym.Env):
 
     def _get_obs(self) -> np.ndarray:
         zone_temps_dict = self.sim.building.get_zone_average_temps()
-        temps = np.array([zone_temps_dict[zid] - 273.15 for zid in self.zone_ids], dtype=np.float32)
+        temps_c = np.array([zone_temps_dict[zid] - 273.15 for zid in self.zone_ids], dtype=np.float32)
 
-        start, end = self._occupancy_window_naive()
+        comfort_mid_c = (self.comfort_band_k[0] + self.comfort_band_k[1]) / 2.0 - 273.15
+        temp_errors = (temps_c - comfort_mid_c).astype(np.float32)  # +warm, -cold
 
-        occupancies = np.array(
-            [
-                occ.average_zone_occupancy(zone_id, start, end)
-                for occ, zone_id in zip(self.occupancies, self.zone_ids)
-            ],
-            dtype=np.float32,
-        )
-
+        start, _ = self._occupancy_window_naive()
         time_feats = self._time_features(start)
 
         supply_air_sp = np.float32(self.air_handler.heating_air_temp_setpoint - 273.15)
         boiler_sp = np.float32(self.boiler.supply_water_setpoint - 273.15)
 
-        ambient_temp = np.float32(
+        ambient_temp_c = float(
             self.air_handler.get_observation(
                 "outside_air_temperature_sensor",
                 self.sim.current_timestamp,
             ) - 273.15
         )
+        ambient_trend = np.float32(ambient_temp_c - self._last_ambient_temp_c)
+        self._last_ambient_temp_c = ambient_temp_c
 
         return np.concatenate([
-            temps,                                        # n
-            occupancies,                                  # n
-            self._last_reheat_cmds.astype(np.float32),    # n
-            time_feats,                                   # 5
+            temps_c,                                      # n  absolute zone temps (°C)
+            temp_errors,                                  # n  zone temp - comfort midpoint
+            self._last_reheat_cmds.astype(np.float32),    # n  last reheat valve positions
+            time_feats,                                   # 5  sin/cos hour, sin/cos dow, weekend
             np.array(
                 [
-                    supply_air_sp,
-                    boiler_sp,
-                    ambient_temp,
-                    self._last_shared_damper_cmd,
+                    supply_air_sp,                        # last supply air setpoint
+                    boiler_sp,                            # last boiler setpoint
+                    np.float32(ambient_temp_c),           # current outdoor temp
+                    ambient_trend,                        # °C change since last step (pre-heat signal)
+                    self._last_shared_damper_cmd,         # last damper position
                 ],
                 dtype=np.float32,
-            ),                                            # 4
+            ),                                            # 5
         ])
 
     def reset(self, *, seed: Optional[int] = None, options: Optional[Dict] = None) -> Tuple[np.ndarray, Dict]:
@@ -182,12 +189,18 @@ class BuildingGymEnv(gym.Env):
         self.step_count = 0
         self._last_shared_damper_cmd = np.float32(0.5)
         self._last_reheat_cmds = np.zeros(self.n_zones, dtype=np.float32)
+        self._last_ambient_temp_c = 0.0
+        self._last_action = None
+        # Keep norms across resets so they accumulate over training episodes.
+        # Set to nan only on the very first reset (already done in __init__).
 
         return self._get_obs(), {}
 
     def step(self, action: np.ndarray):
+        prev_action = self._last_action
         action = np.asarray(action, dtype=np.float32).ravel()
         assert action.size == 3 + self.n_zones
+        self._last_action = action.copy()
 
         supply_air_action  = action[0]
         boiler_action      = action[1]
@@ -250,7 +263,7 @@ class BuildingGymEnv(gym.Env):
         # Comfort penalty is computed from _zone_occupancies_now() in _reward_terms_from_reward_obj.
         r_obj = self.sim.reward_info(_AlwaysZeroOccupancy())
         comfort_penalty, energy_rate = self._reward_terms_from_reward_obj(r_obj)
-        total_reward = self._combine_reward_terms(comfort_penalty, energy_rate)
+        total_reward = self._combine_reward_terms(comfort_penalty, energy_rate, prev_action, action)
 
         self.step_count += 1
         terminated = False
@@ -276,19 +289,17 @@ class BuildingGymEnv(gym.Env):
 
         total_comfort_penalty = 0.0
 
-        occ_by_zone = self._zone_occupancies_now()
-
         weighted_violation_sum = 0.0
         weight_sum = 0.0
 
-        for zone_id, ziv in r.zone_reward_infos.items():
+        for _zone_id, ziv in r.zone_reward_infos.items():
             t = float(ziv.zone_air_temperature)
-            temp_violation = max(comfort_low_k - t, 0.0) + max(t - comfort_high_k, 0.0)
+            # Linear violation in degrees C (K difference = C difference)
+            violation_deg = max(comfort_low_k - t, 0.0) + max(t - comfort_high_k, 0.0)
+            # Quadratic: 1°C off → 1, 4°C off → 16, 8°C off → 64
+            temp_violation = violation_deg ** 2
 
-            # old: occ = float(occ_by_zone.get(zone_id, 0.0))
-            occ = self._occupancy_for_reward_zone(zone_id, occ_by_zone)
-
-            w = 1.0 if occ > 0.0 else 0.0 # just binary no sqrt
+            w = 1.0  # always penalise (occupancy forced on)
             weighted_violation_sum += w * temp_violation
             weight_sum += w
 
@@ -347,23 +358,37 @@ class BuildingGymEnv(gym.Env):
             "reheat_coil_rate":   float(reheat_coil_rate),
         }
 
-        # pump excluded (unrealistic scale)
-        total_energy_rate = blower_rate + ah_conditioning_rate + boiler_gas_rate
+        total_energy_rate = blower_rate + ah_conditioning_rate + boiler_gas_rate + pump_rate
         return float(total_comfort_penalty), float(total_energy_rate)
 
 
 
 
-    def _combine_reward_terms(self, comfort_penalty: float, energy_rate: float) -> float:
-        energy_weight = 1e-4
+    def _combine_reward_terms(self, comfort_penalty: float, energy_rate: float,
+                              prev_action: Optional[np.ndarray] = None,
+                              action: Optional[np.ndarray] = None) -> float:
+        # comfort_penalty: mean squared °C violation → 1°C=1, 4°C=16, 8°C=64
+        # energy_rate: total W normalized by physics-based peak estimate
+        # smoothness_penalty: penalizes large action changes to discourage bang-bang control
+        energy_weight = 0.5
         if self.occupancy_model == "step":
             energy_weight = 0.0
 
-        return float(-(comfort_penalty + energy_weight * energy_rate))
+        energy_penalty = energy_weight * energy_rate / max(self._energy_norm, 1.0)
+
+        # Small penalty on action rate-of-change (max delta per dim = 2.0)
+        # Weight 0.05 → max smoothness penalty ≈ 0.1, much smaller than comfort
+        if prev_action is not None and action is not None:
+            delta = float(np.mean(np.abs(action - prev_action)))
+            smoothness_penalty = 0.05 * delta
+        else:
+            smoothness_penalty = 0.0
+
+        return float(-(comfort_penalty + energy_penalty + smoothness_penalty))
 
     def _reduce_reward_obj_to_scalar(self, r: Any) -> float:
-      comfort_penalty, energy_rate = self._reward_terms_from_reward_obj(r)
-      return self._combine_reward_terms(comfort_penalty, energy_rate)
+        comfort_penalty, energy_rate = self._reward_terms_from_reward_obj(r)
+        return self._combine_reward_terms(comfort_penalty, energy_rate)
 
     def _build_occupancies(self, seed: Optional[int]) -> List[Any]:
         occs: List[Any] = []
