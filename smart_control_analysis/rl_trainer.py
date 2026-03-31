@@ -773,14 +773,17 @@ def _evaluate_period_random_starts(
 
         raw_env = trainer.create_env(params=p, factory_kwargs=factory_kwargs)
         env = _wrap_eval_env(raw_env, trainer)
-        obs, _ = env.reset()
+        is_vec = hasattr(env, "num_envs")
+        reset_out = env.reset()
+        obs = reset_out[0] if isinstance(reset_out, tuple) else reset_out
+        if is_vec:
+            obs = obs[0]
         done = False
         ep_r = 0.0
         ep_l = 0
         while not done:
             action, _ = trainer.model.predict(obs, deterministic=deterministic)
-            # _wrap_eval_env returns VecEnv — step returns arrays; unwrap to scalar
-            if hasattr(env, "num_envs"):
+            if is_vec:
                 obs, reward, terminated, truncated, _ = env.step(action)
                 obs = obs[0]
                 reward = float(reward[0])
