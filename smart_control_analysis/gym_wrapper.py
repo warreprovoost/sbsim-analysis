@@ -96,11 +96,13 @@ class BuildingGymEnv(gym.Env):
             shape=(3 + self.n_zones,),
             dtype=np.float32,
         )
+        self._forecast_hours = [1, 3, 6]  # hours ahead for weather forecast features
         self.observation_space = spaces.Box(
             low=-1e3, high=1e4,
             # temps(n) + temp_errors(n) + reheat_cmds(n) + time_feats(5)
             # + [supply_air_sp, boiler_sp, ambient, ambient_trend, damper](5)
-            shape=(self.n_zones * 3 + 10,),
+            # + forecast_temps(3): outdoor temp at +1h, +3h, +6h
+            shape=(self.n_zones * 3 + 13,),
             dtype=np.float32,
         )
         # convenience references
@@ -163,6 +165,13 @@ class BuildingGymEnv(gym.Env):
         ambient_trend = np.float32(ambient_temp_c - self._last_ambient_temp_c)
         self._last_ambient_temp_c = ambient_temp_c
 
+        # Weather forecast: outdoor temp at +1h, +3h, +6h
+        wc = self.sim.weather_controller
+        if hasattr(wc, "get_forecast_temps_c"):
+            forecast = wc.get_forecast_temps_c(self.sim.current_timestamp, self._forecast_hours)
+        else:
+            forecast = np.full(len(self._forecast_hours), ambient_temp_c, dtype=np.float32)
+
         return np.concatenate([
             temps_c,                                      # n  absolute zone temps (°C)
             temp_errors,                                  # n  zone temp - comfort midpoint
@@ -178,6 +187,7 @@ class BuildingGymEnv(gym.Env):
                 ],
                 dtype=np.float32,
             ),                                            # 5
+            forecast,                                     # 3  outdoor temp at +1h, +3h, +6h
         ])
 
     def reset(self, *, seed: Optional[int] = None, options: Optional[Dict] = None) -> Tuple[np.ndarray, Dict]:

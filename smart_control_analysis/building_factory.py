@@ -191,8 +191,8 @@ def get_base_params() -> dict:
     """Return default parameter configuration."""
     return {
         # Sim
-        "time_step_sec": 300,
-        "max_steps": int(7 * 24 * 3600 / 300),
+        "time_step_sec": 60,
+        "max_steps": int(7 * 24 * 3600 / 60),
         "working_hours":  (0.0, 24.0),
 
 

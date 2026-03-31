@@ -211,7 +211,7 @@ class BuildingRLTrainer:
         algo: str = "sac",
         total_timesteps: int = 100000,
         learning_rate: float = 3e-4,
-        buffer_size: int = 100000,
+        buffer_size: int = 500_000,
         batch_size: int = 256,
         n_envs: int = 1,
         params: Optional[Dict[str, Any]] = None,

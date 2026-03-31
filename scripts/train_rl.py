@@ -62,13 +62,13 @@ PRESETS = {
         description="Full comfort training — 100k steps, 7-day episodes, 1 eval episode",
     ),
     "full": dict(
-        total_timesteps=50_000,
-        chunk_timesteps=5_000,
+        total_timesteps=500_000,
+        chunk_timesteps=50_000,
         episode_days=7,
-        n_eval_episodes=5,
+        n_eval_episodes=2,
         training_mode="full",
         eval_training_mode="full",
-        description="Full training with energy penalty — 100k steps, 7-day episodes",
+        description="Full training with energy penalty — 500k steps, 7-day episodes, 60s timestep",
     ),
     "full_eval1": dict(
         total_timesteps=500_000,
