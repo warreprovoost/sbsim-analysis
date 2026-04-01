@@ -183,6 +183,7 @@ def building_factory(
         max_steps=params.get("max_steps", None),
         occupancy_per_zone=params.get("occupancy_per_zone", 10.0),
         energy_norm=_energy_norm,
+        use_cost_reward=params.get("use_cost_reward", False),
     )
     return building_sim, env
 
@@ -243,4 +244,9 @@ def get_base_params() -> dict:
         "exterior_wall_density": 800,
         "exterior_wall_heat_capacity": 840,
         "exterior_wall_conductivity": 2.0,
+
+        # Reward
+        "use_cost_reward": True,
     }
+
+from smart_control_analysis.energy_prices import GAS_PRICE_BY_MONTH_SOURCE, WEEKDAY_PRICE_BY_HOUR, WEEKEND_PRICE_BY_HOUR  # noqa: F401

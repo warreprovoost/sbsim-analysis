@@ -63,9 +63,10 @@ class ThermostatBaselineController:
         n_zones = env.n_zones
         timestamp = env.sim.current_timestamp
 
-        # Read zone temps and occupancies directly from env (obs layout has changed)
-        zone_temps_k = obs[:n_zones] + 273.15  # convert back to K
-        zone_occupancies = np.ones(n_zones, dtype=np.float32)  # always occupied (working hours forced)
+        # Read zone temps directly from sim — never parse obs (layout changes break this)
+        zone_temps_dict = env.sim.building.get_zone_average_temps()
+        zone_temps_k = np.array([zone_temps_dict[zid] for zid in env.zone_ids], dtype=np.float32)
+        zone_occupancies = np.ones(n_zones, dtype=np.float32)  # always occupied
 
         action = np.zeros(3 + n_zones, dtype=np.float32)
 
@@ -84,10 +85,11 @@ class ThermostatBaselineController:
         # Supply air: keep at neutral setpoint
         action[0] = 0.0  # supply_air_sp = 22°C (center)
 
-        # Boiler: heat when needed
+        # Boiler: heat to comfort midpoint with hysteresis
+        comfort_mid_k = 0.5 * (self.comfort_low_k + self.comfort_high_k)
         min_temp = float(np.min(zone_temps_k))
-        on_th = self.comfort_low_k - self.boiler_on_margin_k
-        off_th = self.comfort_low_k + self.boiler_off_margin_k
+        on_th = comfort_mid_k - self.boiler_on_margin_k   # ON below midpoint-0.6
+        off_th = comfort_mid_k + self.boiler_off_margin_k  # OFF above midpoint+0.6
 
         # initialize once when entering working hours
         if not self._boiler_state_initialized:

@@ -123,6 +123,8 @@ def _make_env_worker(
 
         _, env = building_factory_fn(params.copy(), **kwargs)
         _apply_training_mode_overrides(env, training_mode)
+        from stable_baselines3.common.monitor import Monitor
+        env = Monitor(env)
         return env
 
     return _init
@@ -731,22 +733,6 @@ def _sample_start_in_period(
     return s + (latest - s) * frac
 
 
-def _wrap_eval_env(raw_env, trainer: BuildingRLTrainer):
-    """Wrap a single eval env with VecNormalize using training stats (no stat updates)."""
-    if trainer.vec_normalize is None:
-        return raw_env
-    vec = DummyVecEnv([lambda e=raw_env: e])
-    src = trainer.vec_normalize
-    eval_norm = VecNormalize(vec, norm_obs=src.norm_obs, norm_reward=False,
-                             clip_obs=src.clip_obs, clip_reward=src.clip_reward,
-                             gamma=src.gamma, epsilon=src.epsilon)
-    # Copy running statistics from training env
-    eval_norm.obs_rms = src.obs_rms
-    eval_norm.ret_rms = src.ret_rms
-    eval_norm.training = False  # freeze — don't update stats during eval
-    return eval_norm
-
-
 def _evaluate_period_random_starts(
     trainer: BuildingRLTrainer,
     params_template: Dict[str, Any],
@@ -771,28 +757,19 @@ def _evaluate_period_random_starts(
             time_zone=p["time_zone"],
         ).isoformat()
 
-        raw_env = trainer.create_env(params=p, factory_kwargs=factory_kwargs)
-        env = _wrap_eval_env(raw_env, trainer)
-        is_vec = hasattr(env, "num_envs")
-        reset_out = env.reset()
-        obs = reset_out[0] if isinstance(reset_out, tuple) else reset_out
-        if is_vec:
-            obs = obs[0]
+        env = trainer.create_env(params=p, factory_kwargs=factory_kwargs)
+        obs, _ = env.reset()
+        _vn = trainer.vec_normalize
         done = False
         ep_r = 0.0
         ep_l = 0
         while not done:
-            action, _ = trainer.model.predict(obs, deterministic=deterministic)
-            if is_vec:
-                obs, reward, terminated, truncated, _ = env.step(action)
-                obs = obs[0]
-                reward = float(reward[0])
-                done = bool(terminated[0]) or bool(truncated[0])
-            else:
-                obs, reward, terminated, truncated, _ = env.step(action)
-                done = terminated or truncated
+            obs_in = _vn.normalize_obs(obs) if _vn is not None else obs
+            action, _ = trainer.model.predict(obs_in, deterministic=deterministic)
+            obs, reward, terminated, truncated, _ = env.step(action)
             ep_r += float(reward)
             ep_l += 1
+            done = terminated or truncated
         env.close()
 
         rewards.append(ep_r)
@@ -1033,6 +1010,9 @@ def _run_episode_trace(
             "boiler_gas_rate": float(info.get("boiler_gas_rate", 0.0)),
             "pump_rate_raw": float(info.get("pump_rate_raw", 0.0)),
             "reheat_coil_rate": float(info.get("reheat_coil_rate", 0.0)),
+            "energy_cost_usd": float(info.get("energy_cost_usd", 0.0)),
+            "gas_cost_usd": float(info.get("gas_cost_usd", 0.0)),
+            "elec_cost_usd": float(info.get("elec_cost_usd", 0.0)),
             "reward": float(reward),
             "reward_total": float(info.get("reward_total", reward)),
             "supply_air_sp_C": float(info.get("supply_air_sp_C", np.nan)),
@@ -1204,7 +1184,6 @@ def compare_rl_vs_baseline(
     training_mode: str = "full",
     n_plot_episodes: int = 2,
     verbose: bool = True,
-    # ADD: explicit period control
     val_period_start: str = "2023-11-01",
     val_period_end: str = "2023-11-30",
     test_period_start: str = "2023-11-30",
@@ -1251,6 +1230,18 @@ def compare_rl_vs_baseline(
         verbose=verbose,
     )
 
+    # Training curve plot
+    if (trainer.callback is not None
+            and hasattr(trainer.callback, "episode_rewards")
+            and len(trainer.callback.episode_rewards) > 0):
+        _plot_training_curve(
+            timesteps=trainer.callback.timesteps,
+            episode_rewards=trainer.callback.episode_rewards,
+            val_summary=val_summary,
+            test_summary=test_summary,
+            fig_path=os.path.join(output_dir, "training_curve.png"),
+        )
+
     return {
         "trainer": trainer,
         "val_results": val_summary,
@@ -1268,6 +1259,56 @@ def compare_rl_vs_baseline(
             "test_reward_gain_mean": test_summary["reward_gain_mean"],
         },
     }
+
+def _plot_training_curve(
+    timesteps: List[int],
+    episode_rewards: List[float],
+    val_summary: Dict[str, float],
+    test_summary: Dict[str, float],
+    fig_path: Optional[str] = None,
+    window: int = 20,
+) -> plt.Figure:
+    """Plot episode reward over training timesteps with smoothed trend and val/test reference lines."""
+    fig, ax = plt.subplots(figsize=(14, 5))
+
+    ts = np.array(timesteps)
+    rs = np.array(episode_rewards)
+
+    ax.plot(ts, rs, color="tab:blue", alpha=0.25, linewidth=0.8, label="Episode reward")
+
+    # Smoothed moving average
+    if len(rs) >= window:
+        kernel = np.ones(window) / window
+        smoothed = np.convolve(rs, kernel, mode="valid")
+        smooth_ts = ts[window - 1:]
+        ax.plot(smooth_ts, smoothed, color="tab:blue", linewidth=2.0,
+                label=f"Smoothed (window={window})")
+
+    # Val and test mean reward as horizontal reference lines
+    ax.axhline(val_summary["rl_reward_mean"], color="tab:orange", linestyle="--", linewidth=1.5,
+               label=f"Val RL mean ({val_summary['rl_reward_mean']:.1f})")
+    ax.axhline(val_summary["baseline_reward_mean"], color="tab:orange", linestyle=":",
+               linewidth=1.2, label=f"Val baseline mean ({val_summary['baseline_reward_mean']:.1f})")
+    ax.axhline(test_summary["rl_reward_mean"], color="tab:red", linestyle="--", linewidth=1.5,
+               label=f"Test RL mean ({test_summary['rl_reward_mean']:.1f})")
+    ax.axhline(test_summary["baseline_reward_mean"], color="tab:red", linestyle=":",
+               linewidth=1.2, label=f"Test baseline mean ({test_summary['baseline_reward_mean']:.1f})")
+
+    ax.set_xlabel("Timesteps")
+    ax.set_ylabel("Episode reward")
+    ax.set_title("Training curve — episode reward over time")
+    ax.legend(fontsize=8, ncol=2)
+    ax.grid(alpha=0.25)
+    plt.tight_layout()
+
+    if fig_path is not None:
+        run_id = os.path.basename(os.path.dirname(fig_path))
+        fig.text(0.01, 0.002, f"run: {run_id}", fontsize=6, color="gray", va="bottom")
+        plt.savefig(fig_path, dpi=150, bbox_inches="tight")
+        print(f"Saved training curve: {fig_path}")
+
+    return fig
+
 
 def _plot_episode_trace_4panel(
     df: pd.DataFrame,
@@ -1347,24 +1388,25 @@ def _plot_episode_trace_6panel(
     comfort_band_c: Tuple[float, float],
     title: str = "",
     fig_path: Optional[str] = None,
-    figsize: Tuple[int, int] = (18, 20),
+    figsize: Tuple[int, int] = (18, 24),
 ) -> plt.Figure:
     """
-    Plot a 6-panel episode trace:
+    Plot a 7-panel episode trace:
       1. Room temperature + comfort band
       2. Outside temperature
       3. Comfort penalty
       4. Energy rate (W)
-      5. Cumulative reward
-      6. Actions
+      5. Energy cost (USD/step): gas, electricity, total
+      6. Cumulative reward
+      7. Actions
     """
     comfort_low_c, comfort_high_c = comfort_band_c
 
     fig, axes = plt.subplots(
-        6, 1, figsize=figsize, sharex=True,
-        gridspec_kw={"height_ratios": [2.0, 1.2, 1.2, 1.4, 1.4, 1.5]},
+        7, 1, figsize=figsize, sharex=True,
+        gridspec_kw={"height_ratios": [2.0, 1.2, 1.2, 1.4, 1.4, 1.4, 1.5]},
     )
-    ax_room, ax_out, ax_pen, ax_energy, ax_reward, ax_act = axes
+    ax_room, ax_out, ax_pen, ax_energy, ax_cost, ax_reward, ax_act = axes
 
     # --- 1) Room temperature ---
     working_hours = (8.0, 18.0)
@@ -1414,7 +1456,29 @@ def _plot_episode_trace_6panel(
     ax_energy.grid(alpha=0.25)
     ax_energy.legend(loc="upper right", fontsize=8)
 
-    # --- 5) Cumulative + step reward ---
+    # --- 5) Energy cost (USD/hr) — 3 separate lines ---
+    has_cost = "energy_cost_usd" in df.columns and df["energy_cost_usd"].notna().any()
+    if has_cost:
+        if len(df) > 1:
+            dt_sec = (df["timestamp"].iloc[1] - df["timestamp"].iloc[0]).total_seconds()
+        else:
+            dt_sec = 60.0
+        scale = 3600.0 / dt_sec  # USD/step → USD/hr
+        ax_cost.plot(df["timestamp"], df["gas_cost_usd"] * scale,
+                     color="tab:orange", linewidth=1.4, label="Gas (USD/hr)")
+        ax_cost.plot(df["timestamp"], df["elec_cost_usd"] * scale,
+                     color="tab:blue", linewidth=1.4, label="Electricity (USD/hr)")
+        ax_cost.plot(df["timestamp"], df["energy_cost_usd"] * scale,
+                     color="black", linewidth=1.8, linestyle="--", label="Total (USD/hr)")
+        ax_cost.set_ylabel("Energy cost\n(USD/hr)")
+    else:
+        ax_cost.text(0.5, 0.5, "No cost data", ha="center", va="center",
+                     transform=ax_cost.transAxes)
+        ax_cost.set_ylabel("Energy cost\n(USD/hr)")
+    ax_cost.grid(alpha=0.25)
+    ax_cost.legend(loc="upper right", fontsize=8)
+
+    # --- 6) Cumulative + step reward ---
     if "reward" in df.columns:
         cum_reward = df["reward"].cumsum()
         ax_reward.plot(df["timestamp"], cum_reward,
@@ -1466,6 +1530,11 @@ def _plot_episode_trace_6panel(
     plt.tight_layout()
 
     if fig_path is not None:
+        # Add run id as small footer so the plot is self-identifying
+        run_id = os.path.basename(os.path.dirname(os.path.dirname(os.path.dirname(fig_path))))
+        episode_file = os.path.basename(fig_path)
+        fig.text(0.01, 0.002, f"run: {run_id}  |  {episode_file}",
+                 fontsize=6, color="gray", va="bottom", ha="left")
         plt.savefig(fig_path, dpi=150, bbox_inches="tight")
         print(f"Saved 6-panel plot: {fig_path}")
 

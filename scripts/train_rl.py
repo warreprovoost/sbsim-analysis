@@ -26,9 +26,9 @@ from smart_control_analysis.rl_trainer import run_rl_setup, compare_rl_vs_baseli
 # ─────────────────────────────────────────────
 PRESETS = {
     "mini": dict(
-        total_timesteps=400,
-        chunk_timesteps=200,
-        episode_days=2,
+        total_timesteps=6000,
+        chunk_timesteps=3000,
+        episode_days=7,
         n_eval_episodes=1,
         training_mode="full",
         eval_training_mode="full",

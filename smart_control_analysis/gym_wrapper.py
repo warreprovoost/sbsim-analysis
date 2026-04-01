@@ -9,6 +9,9 @@ import re
 
 from smart_control.simulator.randomized_arrival_departure_occupancy import RandomizedArrivalDepartureOccupancy
 from smart_control.simulator.step_function_occupancy import StepFunctionOccupancy
+from smart_control.reward.natural_gas_energy_cost import NaturalGasEnergyCost
+from smart_control.reward.electricity_energy_cost import ElectricityEnergyCost
+from smart_control_analysis.energy_prices import GAS_PRICE_BY_MONTH_SOURCE, WEEKDAY_PRICE_BY_HOUR, WEEKEND_PRICE_BY_HOUR
 
 
 class _AlwaysZeroOccupancy:
@@ -52,6 +55,7 @@ class BuildingGymEnv(gym.Env):
         occupancy_per_zone: float = 10.0,
         occupancy_kwargs: Optional[Dict[str, Any]] = None,
         energy_norm: float = 500.0,  # W — expected peak *total* energy for this building
+        use_cost_reward: bool = False,  # if True, use monetary cost (USD/step) instead of W
     ):
         super().__init__()
         self.sim = sim
@@ -76,6 +80,24 @@ class BuildingGymEnv(gym.Env):
         # Seeded from energy_norm so boiler/blower/AH absolute costs are preserved.
         # EMA slowly raises the norm if the sim regularly exceeds the initial estimate.
         self._energy_norm: float = float(energy_norm)  # fixed — set from physics in building_factory
+        self.use_cost_reward = use_cost_reward
+
+        # Pre-extract scalar prices ($/J for gas, $/Ws for elec) to avoid pint overhead per step.
+        # NaturalGasEnergyCost stores _month_gas_price as plain np.array ($/J).
+        _gas_obj = NaturalGasEnergyCost(gas_price_by_month=GAS_PRICE_BY_MONTH_SOURCE)
+        self._gas_price_per_j: np.ndarray = _gas_obj._month_gas_price  # shape (12,), $/J
+
+        # ElectricityEnergyCost stores prices as pint quantities → extract .magnitude ($/Ws).
+        _elec_obj = ElectricityEnergyCost(weekday_energy_prices=WEEKDAY_PRICE_BY_HOUR, weekend_energy_prices=WEEKEND_PRICE_BY_HOUR)
+        self._elec_weekday: np.ndarray = np.array([v.magnitude if hasattr(v, 'magnitude') else float(v)
+                                                   for v in _elec_obj._weekday_energy_prices])  # (24,) $/Ws
+        self._elec_weekend: np.ndarray = np.array([v.magnitude if hasattr(v, 'magnitude') else float(v)
+                                                   for v in _elec_obj._weekend_energy_prices])  # (24,) $/Ws
+
+        # Cost norm: peak cost per step at 60s timestep.
+        # Peak boiler (113W gas, Jan) + blower (30W elec peak) for 60s ≈ $0.000161
+        # With energy_weight=2.0: peak penalty = 2.0 * 0.000161/0.000161 = 2.0
+        self._cost_norm: float = 0.000161
 
         zone_temps_dict = self.sim.building.get_zone_average_temps()
         self.zone_ids = sorted(zone_temps_dict.keys())  # e.g., ["room_1", "room_2"]
@@ -116,7 +138,7 @@ class BuildingGymEnv(gym.Env):
         end = start + pd.to_timedelta(self.sim.time_step_sec, unit="s")
 
         if isinstance(start, pd.Timestamp) and start.tzinfo is not None:
-            # FIX: tz_convert first to get correct local time, THEN strip tz
+            # tz_convert first to get correct local time, THEN strip tz
             start = start.tz_convert(self.time_zone).tz_localize(None)
             end = end.tz_convert(self.time_zone).tz_localize(None)
 
@@ -145,16 +167,22 @@ class BuildingGymEnv(gym.Env):
 
     def _get_obs(self) -> np.ndarray:
         zone_temps_dict = self.sim.building.get_zone_average_temps()
+        self._cached_zone_temps_dict = zone_temps_dict  # reused in _reward_terms_from_reward_obj
         temps_c = np.array([zone_temps_dict[zid] - 273.15 for zid in self.zone_ids], dtype=np.float32)
 
         comfort_mid_c = (self.comfort_band_k[0] + self.comfort_band_k[1]) / 2.0 - 273.15
         temp_errors = (temps_c - comfort_mid_c).astype(np.float32)  # +warm, -cold
 
-        start, _ = self._occupancy_window_naive()
-        time_feats = self._time_features(start)
+        local_ts = self.sim.current_timestamp.tz_convert(self.time_zone)
+        time_feats = self._time_features(local_ts)
 
-        supply_air_sp = np.float32(self.air_handler.heating_air_temp_setpoint - 273.15)
-        boiler_sp = np.float32(self.boiler.supply_water_setpoint - 273.15)
+        # Supply air setpoint: action range maps to [12, 32]°C → normalise to [-1, 1]
+        supply_air_sp_raw = self.air_handler.heating_air_temp_setpoint - 273.15
+        supply_air_sp = np.float32((supply_air_sp_raw - 22.0) / 10.0)   # centre=22, half-range=10
+
+        # Boiler setpoint: action range maps to [36, 65]°C → normalise to [-1, 1]
+        boiler_sp_raw = self.boiler.supply_water_setpoint - 273.15
+        boiler_sp = np.float32((boiler_sp_raw - 50.5) / 14.5)           # centre=50.5, half-range=14.5
 
         ambient_temp_c = float(
             self.air_handler.get_observation(
@@ -162,32 +190,43 @@ class BuildingGymEnv(gym.Env):
                 self.sim.current_timestamp,
             ) - 273.15
         )
+        # Ambient: Oslo winter range roughly [-20, +20]°C → normalise to [-1, 1]
+        ambient_norm = np.float32(ambient_temp_c / 20.0)
         ambient_trend = np.float32(ambient_temp_c - self._last_ambient_temp_c)
+        # Trend: typically within ±2°C/step → normalise to [-1, 1]
+        ambient_trend_norm = np.float32(np.clip(ambient_trend / 2.0, -1.0, 1.0))
         self._last_ambient_temp_c = ambient_temp_c
 
-        # Weather forecast: outdoor temp at +1h, +3h, +6h
-        wc = self.sim.weather_controller
+        # temp_errors: comfort band is 1°C wide, violations up to ~8°C → clip/norm to [-1, 1]
+        temp_errors_norm = np.clip(temp_errors / 8.0, -1.0, 1.0).astype(np.float32)
+
+        # Weather forecast: same normalisation as ambient
+        wc = getattr(self.sim, "weather_controller", None) or getattr(self.sim, "_weather_controller", None)
         if hasattr(wc, "get_forecast_temps_c"):
-            forecast = wc.get_forecast_temps_c(self.sim.current_timestamp, self._forecast_hours)
+            forecast_raw = wc.get_forecast_temps_c(self.sim.current_timestamp, self._forecast_hours)
         else:
-            forecast = np.full(len(self._forecast_hours), ambient_temp_c, dtype=np.float32)
+            forecast_raw = np.full(len(self._forecast_hours), ambient_temp_c, dtype=np.float32)
+        forecast_norm = np.clip(forecast_raw / 20.0, -1.0, 1.0).astype(np.float32)
+
+        # temps_c: absolute zone temp, centre on comfort midpoint, same ±8°C normalisation
+        temps_norm = np.clip((temps_c - (comfort_mid_c)) / 8.0, -1.0, 1.0).astype(np.float32)
 
         return np.concatenate([
-            temps_c,                                      # n  absolute zone temps (°C)
-            temp_errors,                                  # n  zone temp - comfort midpoint
-            self._last_reheat_cmds.astype(np.float32),    # n  last reheat valve positions
-            time_feats,                                   # 5  sin/cos hour, sin/cos dow, weekend
+            temps_norm,                                   # n  zone temp normalised to [-1,1]
+            temp_errors_norm,                             # n  comfort error normalised to [-1,1]
+            self._last_reheat_cmds.astype(np.float32),    # n  last reheat valve positions [-1,1] already
+            time_feats,                                   # 5  sin/cos ∈ [-1,1], weekend ∈ {0,1}
             np.array(
                 [
-                    supply_air_sp,                        # last supply air setpoint
-                    boiler_sp,                            # last boiler setpoint
-                    np.float32(ambient_temp_c),           # current outdoor temp
-                    ambient_trend,                        # °C change since last step (pre-heat signal)
-                    self._last_shared_damper_cmd,         # last damper position
+                    supply_air_sp,                        # [-1, 1] normalised setpoint
+                    boiler_sp,                            # [-1, 1] normalised setpoint
+                    ambient_norm,                         # [-1, 1] outdoor temp
+                    ambient_trend_norm,                   # [-1, 1] temp change since last step
+                    self._last_shared_damper_cmd,         # [-1, 1] damper position
                 ],
                 dtype=np.float32,
             ),                                            # 5
-            forecast,                                     # 3  outdoor temp at +1h, +3h, +6h
+            forecast_norm,                                # 3  forecast temps normalised to [-1,1]
         ])
 
     def reset(self, *, seed: Optional[int] = None, options: Optional[Dict] = None) -> Tuple[np.ndarray, Dict]:
@@ -273,7 +312,19 @@ class BuildingGymEnv(gym.Env):
         # Comfort penalty is computed from _zone_occupancies_now() in _reward_terms_from_reward_obj.
         r_obj = self.sim.reward_info(_AlwaysZeroOccupancy())
         comfort_penalty, energy_rate = self._reward_terms_from_reward_obj(r_obj)
-        total_reward = self._combine_reward_terms(comfort_penalty, energy_rate, prev_action, action)
+
+        # Compute monetary cost per step using pre-extracted scalar prices (no pint overhead).
+        # dt is always time_step_sec — no need to diff timestamps.
+        dt = float(self.sim.time_step_sec)
+        local_start = action_timestamp.tz_convert(self.time_zone)
+        gas_rate = max(0.0, self._last_energy_components["boiler_gas_rate"])
+        gas_cost = float(self._gas_price_per_j[local_start.month - 1] * gas_rate * dt)
+        elec_rate = abs(self._last_energy_components["blower_rate"]) + abs(self._last_energy_components["ah_conditioning_rate"])
+        elec_price = self._elec_weekend[local_start.hour] if local_start.dayofweek >= 5 else self._elec_weekday[local_start.hour]
+        elec_cost = float(elec_price * elec_rate * dt)
+        total_cost = gas_cost + elec_cost
+
+        total_reward = self._combine_reward_terms(comfort_penalty, energy_rate, total_cost, prev_action, action)
 
         self.step_count += 1
         terminated = False
@@ -282,11 +333,14 @@ class BuildingGymEnv(gym.Env):
         info: Dict = {
             "comfort_penalty":      float(comfort_penalty),
             "energy_rate":          float(energy_rate),
+            "energy_cost_usd":      float(total_cost),
+            "gas_cost_usd":         float(gas_cost),
+            "elec_cost_usd":        float(elec_cost),
             "blower_rate":          self._last_energy_components["blower_rate"],
             "ah_conditioning_rate": self._last_energy_components["ah_conditioning_rate"],
             "boiler_gas_rate":      self._last_energy_components["boiler_gas_rate"],
             "pump_rate_raw":        self._last_energy_components["pump_rate_raw"],
-            "reheat_coil_rate":     self._last_energy_components["reheat_coil_rate"],  # new
+            "reheat_coil_rate":     self._last_energy_components["reheat_coil_rate"],
             "reward_total":         float(total_reward),
             "supply_air_sp_C":      supply_air_sp - 273.15,
             "boiler_sp_C":          boiler_sp - 273.15,
@@ -302,15 +356,24 @@ class BuildingGymEnv(gym.Env):
         weighted_violation_sum = 0.0
         weight_sum = 0.0
 
+        comfort_mid_k = 0.5 * (comfort_low_k + comfort_high_k)
+        comfort_half_band = 0.5 * (comfort_high_k - comfort_low_k)
+
+        weighted_violation_sum = 0.0
+        weight_sum = 0.0
+
         for _zone_id, ziv in r.zone_reward_infos.items():
             t = float(ziv.zone_air_temperature)
             # Linear violation in degrees C (K difference = C difference)
             violation_deg = max(comfort_low_k - t, 0.0) + max(t - comfort_high_k, 0.0)
             # Quadratic: 1°C off → 1, 4°C off → 16, 8°C off → 64
             temp_violation = violation_deg ** 2
+            # Small linear bonus for proximity to band center (max 0.5 at center, 0 at band edge)
+            # Subtracting bonus reduces net penalty when well-centred
+            center_bonus = 0.5 * max(0.0, 1.0 - abs(t - comfort_mid_k) / comfort_half_band)
 
             w = 1.0  # always penalise (occupancy forced on)
-            weighted_violation_sum += w * temp_violation
+            weighted_violation_sum += w * (temp_violation - center_bonus)
             weight_sum += w
 
         total_comfort_penalty = (
@@ -336,10 +399,9 @@ class BuildingGymEnv(gym.Env):
             for binfo in r.boiler_reward_infos.values()
         )
 
-        # get supply air temp from AH after sim step
-        recirculation_temp = float(
-            np.mean(list(self.sim.building.get_zone_average_temps().values()))
-        )
+        # get supply air temp from AH after sim step — reuse cached temps from _get_obs
+        _zt = getattr(self, "_cached_zone_temps_dict", None) or self.sim.building.get_zone_average_temps()
+        recirculation_temp = float(np.mean(list(_zt.values())))
 
         ambient_temp = float(
             self.air_handler.get_observation(
@@ -375,16 +437,22 @@ class BuildingGymEnv(gym.Env):
 
 
     def _combine_reward_terms(self, comfort_penalty: float, energy_rate: float,
+                              total_cost: float = 0.0,
                               prev_action: Optional[np.ndarray] = None,
                               action: Optional[np.ndarray] = None) -> float:
         # comfort_penalty: mean squared °C violation → 1°C=1, 4°C=16, 8°C=64
-        # energy_rate: total W normalized by physics-based peak estimate
+        # energy_rate (watts mode): total W normalized by physics-based peak estimate
+        # total_cost (cost mode): USD/step normalized by cost_norm
         # smoothness_penalty: penalizes large action changes to discourage bang-bang control
-        energy_weight = 0.5
-        if self.occupancy_model == "step":
-            energy_weight = 0.0
-
-        energy_penalty = energy_weight * energy_rate / max(self._energy_norm, 1.0)
+        if self.use_cost_reward:
+            # Cost mode: peak energy penalty ≈ 2.0 (2× a 1°C violation).
+            # Agent strongly prefers saving energy while comfort violations dominate quadratically.
+            energy_weight = 2.0 if self.occupancy_model != "step" else 0.0
+            energy_penalty = energy_weight * total_cost / max(self._cost_norm, 1e-9)
+        else:
+            # Watts mode: normalize by physics peak estimate
+            energy_weight = 2.0 if self.occupancy_model != "step" else 0.0
+            energy_penalty = energy_weight * energy_rate / max(self._energy_norm, 1.0)
 
         # Small penalty on action rate-of-change (max delta per dim = 2.0)
         # Weight 0.05 → max smoothness penalty ≈ 0.1, much smaller than comfort
@@ -398,7 +466,7 @@ class BuildingGymEnv(gym.Env):
 
     def _reduce_reward_obj_to_scalar(self, r: Any) -> float:
         comfort_penalty, energy_rate = self._reward_terms_from_reward_obj(r)
-        return self._combine_reward_terms(comfort_penalty, energy_rate)
+        return self._combine_reward_terms(comfort_penalty, energy_rate, total_cost=0.0)
 
     def _build_occupancies(self, seed: Optional[int]) -> List[Any]:
         occs: List[Any] = []
