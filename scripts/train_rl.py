@@ -63,7 +63,7 @@ PRESETS = {
     ),
     "full": dict(
         total_timesteps=500_000,
-        chunk_timesteps=50_000,
+        chunk_timesteps=10_000,
         episode_days=7,
         n_eval_episodes=2,
         training_mode="full",

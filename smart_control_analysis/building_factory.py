@@ -16,6 +16,8 @@ from smart_control.simulator.building import MaterialProperties
 from smart_control.simulator.hvac_floorplan_based import FloorPlanBasedHvac
 from smart_control.simulator.setpoint_schedule import SetpointSchedule
 from smart_control_analysis.custom_sbsim.fast_cpu_simulator import FastCPUSimulator
+from smart_control_analysis.floorplans import single_room, office_4room, corporate_floor
+
 
 
 def building_factory(
@@ -46,16 +48,13 @@ def building_factory(
         high = low + min_delta
         params["outdoor_high_temp"] = high
 
-    def single_room_floorplan(room_width: int, room_height: int):
-        total_width = room_width + 2
-        total_height = room_height + 2
-        floorplan = np.full((total_height, total_width), 2, dtype=int)
-        zone_map = np.full((total_height, total_width), -1, dtype=int)
-        floorplan[1:-1, 1:-1] = 0
-        zone_map[1:-1, 1:-1] = 0
-        return floorplan, zone_map
-
-    floor_plan, zone_map = single_room_floorplan(room_width=10, room_height=10)
+    floorplan_name = params.get("floorplan", "single_room")
+    if floorplan_name == "office_4room":
+        floor_plan, zone_map = office_4room()
+    elif floorplan_name == "corporate_floor":
+        floor_plan, zone_map = corporate_floor()
+    else:
+        floor_plan, zone_map = single_room(room_width=10, room_height=10)
 
     # Material properties from params
     inside_air = MaterialProperties(
@@ -145,7 +144,7 @@ def building_factory(
         schedule=schedule,
         vav_max_air_flow_rate=params.get("vav_max_flow", 1.2),
         vav_reheat_max_water_flow_rate=params.get("vav_reheat_flow", 0.1),
-        zone_identifier=["room_1"],
+        zone_identifier=None,  # filled automatically from building._room_dict
     )
 
     building_sim = FastCPUSimulator(
@@ -180,6 +179,7 @@ def building_factory(
         occupancy_model=occupancy_model,
         comfort_band_k=params.get("comfort_band_k", (294.15, 295.15)),
         working_hours=params.get("working_hours", (8.0, 18.0)),
+        night_setback_k=params.get("night_setback_k", 2.0),
         max_steps=params.get("max_steps", None),
         occupancy_per_zone=params.get("occupancy_per_zone", 10.0),
         energy_norm=_energy_norm,
@@ -194,7 +194,8 @@ def get_base_params() -> dict:
         # Sim
         "time_step_sec": 60,
         "max_steps": int(7 * 24 * 3600 / 60),
-        "working_hours":  (0.0, 24.0),
+        "working_hours":  (8.0, 18.0),
+        "floorplan": "office_4room",  # "single_room" for original 1-zone layout
 
 
         # Weather
@@ -225,7 +226,7 @@ def get_base_params() -> dict:
         "vav_reheat_flow": 0.001, # this is reheat_demand when vav is turned 'on'
 
         # Building geometry
-        "cv_size_cm": 25.0,
+        "cv_size_cm": 50.0,
         "floor_height_cm": 300.0,
         "initial_temp_celsius": 20.0,
         "buffer_from_walls": 1,
@@ -247,6 +248,7 @@ def get_base_params() -> dict:
 
         # Reward
         "use_cost_reward": True,
+        "night_setback_k": 4.0,  # lower comfort band by 2K outside working hours (18-20°C at night)
     }
 
 from smart_control_analysis.energy_prices import GAS_PRICE_BY_MONTH_SOURCE, WEEKDAY_PRICE_BY_HOUR, WEEKEND_PRICE_BY_HOUR  # noqa: F401

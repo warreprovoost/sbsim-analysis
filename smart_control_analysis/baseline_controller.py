@@ -13,9 +13,11 @@ class ThermostatBaselineController:
     """
 
     def __init__(self, comfort_band_k=(294.15, 295.15), working_hours=(8.0, 18.0),
+                 night_setback_k=2.0,
                  boiler_sp_heating_k=338.15, boiler_sp_idle_k=318.15, supply_air_sp_k=295.15):
         self.comfort_low_k, self.comfort_high_k = comfort_band_k
         self.working_hours = working_hours
+        self.night_setback_k = float(night_setback_k)
         self.boiler_sp_heating_k = boiler_sp_heating_k
         self.boiler_sp_idle_k = boiler_sp_idle_k
         self.supply_air_sp_k = supply_air_sp_k
@@ -31,6 +33,20 @@ class ThermostatBaselineController:
         self.min_on_steps = 4
         self.min_off_steps = 4
 
+
+    def _comfort_band_now_k(self, timestamp):
+        """Return (low_k, high_k) adjusted for night setback."""
+        if self.night_setback_k == 0.0:
+            return self.comfort_low_k, self.comfort_high_k
+        hour = timestamp.hour + timestamp.minute / 60.0
+        start_h, end_h = self.working_hours
+        if start_h <= end_h:
+            in_working_hours = start_h <= hour < end_h
+        else:
+            in_working_hours = hour >= start_h or hour < end_h
+        if in_working_hours:
+            return self.comfort_low_k, self.comfort_high_k
+        return self.comfort_low_k - self.night_setback_k, self.comfort_high_k  # only lower the floor
 
     def _is_working_hours(self, timestamp) -> bool:
 
@@ -81,12 +97,13 @@ class ThermostatBaselineController:
             action[3:] = -1.0  # all reheat off
             return action
 
-        # During working hours: maintain comfort band
+        # During working hours: maintain comfort band (with night setback if outside hours)
         # Supply air: keep at neutral setpoint
         action[0] = 0.0  # supply_air_sp = 22°C (center)
 
         # Boiler: heat to comfort midpoint with hysteresis
-        comfort_mid_k = 0.5 * (self.comfort_low_k + self.comfort_high_k)
+        comfort_low_k, comfort_high_k = self._comfort_band_now_k(timestamp)
+        comfort_mid_k = 0.5 * (comfort_low_k + comfort_high_k)
         min_temp = float(np.min(zone_temps_k))
         on_th = comfort_mid_k - self.boiler_on_margin_k   # ON below midpoint-0.6
         off_th = comfort_mid_k + self.boiler_off_margin_k  # OFF above midpoint+0.6
@@ -123,15 +140,15 @@ class ThermostatBaselineController:
             if occ < 0.1:
                 # Zone unoccupied: no heating
                 action[3 + i] = -1.0
-            elif temp < self.comfort_low_k - 1.0:
+            elif temp < comfort_low_k - 1.0:
                 # Zone too cold: full reheat
                 action[3 + i] = 1.0
-            elif temp > self.comfort_high_k + 1.0:
+            elif temp > comfort_high_k + 1.0:
                 # Zone too hot: no reheat (let damper/AH cool)
                 action[3 + i] = -1.0
             else:
                 # Proportional control within dead band
-                error = self.comfort_low_k - temp
+                error = comfort_low_k - temp
                 reheat_cmd = np.clip(error / 1.0, -1.0, 1.0)
                 action[3 + i] = float(reheat_cmd)
 

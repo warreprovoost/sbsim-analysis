@@ -51,6 +51,7 @@ class BuildingGymEnv(gym.Env):
         max_steps: Optional[int] = None,
         comfort_band_k: Tuple[float, float] = (294.15, 295.15),  # 21C to 22C
         working_hours: Tuple[float, float] = (8.0, 18.0),
+        night_setback_k: float = 2.0,  # K to lower the band outside working hours
         occupancy_model: str = "randomized",   # "randomized" or "step"
         occupancy_per_zone: float = 10.0,
         occupancy_kwargs: Optional[Dict[str, Any]] = None,
@@ -66,6 +67,7 @@ class BuildingGymEnv(gym.Env):
 
         self.comfort_band_k = comfort_band_k
         self.working_hours = working_hours
+        self.night_setback_k = float(night_setback_k)
 
         self.occupancy_model = occupancy_model
         self.occupancy_per_zone = float(occupancy_per_zone)
@@ -131,6 +133,21 @@ class BuildingGymEnv(gym.Env):
         self.air_handler = self.sim.hvac.air_handler
         self.boiler = self.sim.hvac.boiler
         self.vavs = self.sim.hvac.vavs  # dict: zone_id -> VAV object
+
+    def _comfort_band_now_k(self, timestamp: Optional[pd.Timestamp] = None) -> Tuple[Tuple[float, float], bool]:
+        """Return ((low_k, high_k), is_working_hours).
+
+        At night the floor is lowered by night_setback_k; the ceiling is unchanged.
+        """
+        ts = timestamp if timestamp is not None else self.sim.current_timestamp
+        local_ts = ts.tz_convert(self.time_zone) if ts.tzinfo is not None else ts
+        hour = local_ts.hour + local_ts.minute / 60.0
+        start_h, end_h = self.working_hours
+        in_working_hours = start_h <= hour < end_h
+        if in_working_hours or self.night_setback_k == 0.0:
+            return self.comfort_band_k, True
+        low, high = self.comfort_band_k
+        return (low - self.night_setback_k, high), False
 
     def _occupancy_window_naive(self) -> Tuple[pd.Timestamp, pd.Timestamp]:
         """Return [start, end] as tz-naive LOCAL timestamps for occupancy models."""
@@ -330,7 +347,10 @@ class BuildingGymEnv(gym.Env):
         terminated = False
         truncated = self.step_count >= self.max_steps
 
+        (comfort_low_k, comfort_high_k), _ = self._comfort_band_now_k(action_timestamp)
         info: Dict = {
+            "comfort_low_c":        comfort_low_k - 273.15,
+            "comfort_high_c":       comfort_high_k - 273.15,
             "comfort_penalty":      float(comfort_penalty),
             "energy_rate":          float(energy_rate),
             "energy_cost_usd":      float(total_cost),
@@ -349,7 +369,7 @@ class BuildingGymEnv(gym.Env):
         return obs, float(total_reward), terminated, truncated, info
 
     def _reward_terms_from_reward_obj(self, r: Any) -> Tuple[float, float]:
-        comfort_low_k, comfort_high_k = self.comfort_band_k
+        (comfort_low_k, comfort_high_k), is_working = self._comfort_band_now_k()
 
         total_comfort_penalty = 0.0
 
@@ -368,9 +388,12 @@ class BuildingGymEnv(gym.Env):
             violation_deg = max(comfort_low_k - t, 0.0) + max(t - comfort_high_k, 0.0)
             # Quadratic: 1°C off → 1, 4°C off → 16, 8°C off → 64
             temp_violation = violation_deg ** 2
-            # Small linear bonus for proximity to band center (max 0.5 at center, 0 at band edge)
-            # Subtracting bonus reduces net penalty when well-centred
-            center_bonus = 0.5 * max(0.0, 1.0 - abs(t - comfort_mid_k) / comfort_half_band)
+            # Center bonus only during working hours — at night we don't want to incentivise
+            # cooling toward the (shifted-down) midpoint, just avoid falling below the lower floor.
+            if is_working:
+                center_bonus = 0.5 * max(0.0, 1.0 - abs(t - comfort_mid_k) / comfort_half_band)
+            else:
+                center_bonus = 0.0
 
             w = 1.0  # always penalise (occupancy forced on)
             weighted_violation_sum += w * (temp_violation - center_bonus)

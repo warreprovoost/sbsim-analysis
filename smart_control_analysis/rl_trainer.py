@@ -969,6 +969,26 @@ def _extract_action_channels(action: np.ndarray) -> Dict[str, float]:
     }
 
 
+def _discomfort_degree_hours(df: pd.DataFrame, dt_sec: float) -> float:
+    """
+    Compute total discomfort in degree-hours for one episode trace.
+
+    Uses per-step comfort_low_c / comfort_high_c columns (supports night setback).
+    Discomfort = Σ  max(T_low - T_zone, 0) + max(T_zone - T_high, 0)  ×  dt_h
+
+    A value of 0 means the zone was always inside the comfort band.
+    A value of 1 means the zone was 1°C outside the band for 1 hour.
+    """
+    if df.empty:
+        return 0.0
+    dt_h = dt_sec / 3600.0
+    t = df["room_temp_c"].to_numpy()
+    low = df["comfort_low_c"].to_numpy() if "comfort_low_c" in df.columns else np.full(len(t), np.nan)
+    high = df["comfort_high_c"].to_numpy() if "comfort_high_c" in df.columns else np.full(len(t), np.nan)
+    violation = np.maximum(low - t, 0.0) + np.maximum(t - high, 0.0)
+    return float(violation.sum() * dt_h)
+
+
 def _run_episode_trace(
     env,
     policy_fn,
@@ -982,6 +1002,7 @@ def _run_episode_trace(
     ep_reward = 0.0
     ep_comfort = 0.0
     ep_energy = 0.0
+    ep_cost = 0.0
     ep_len = 0
 
     comfort_low_c = env.comfort_band_k[0] - 273.15
@@ -1017,6 +1038,8 @@ def _run_episode_trace(
             "reward_total": float(info.get("reward_total", reward)),
             "supply_air_sp_C": float(info.get("supply_air_sp_C", np.nan)),
             "boiler_sp_C": float(info.get("boiler_sp_C", np.nan)),
+            "comfort_low_c": float(info.get("comfort_low_c", env.comfort_band_k[0] - 273.15)),
+            "comfort_high_c": float(info.get("comfort_high_c", env.comfort_band_k[1] - 273.15)),
         }
         row.update(_extract_action_channels(action))
         rows.append(row)
@@ -1024,6 +1047,7 @@ def _run_episode_trace(
         ep_reward += float(reward)
         ep_comfort += float(info.get("comfort_penalty", 0.0))
         ep_energy += float(info.get("energy_rate", 0.0))
+        ep_cost += float(info.get("energy_cost_usd", 0.0))
         ep_len += 1
         done = terminated or truncated
 
@@ -1031,13 +1055,64 @@ def _run_episode_trace(
     if not df.empty:
         df["timestamp"] = pd.to_datetime(df["timestamp"])
 
+    dt_sec = float(env.sim.time_step_sec)
     metrics = {
         "reward": ep_reward,
         "comfort_penalty": ep_comfort,
         "energy": ep_energy,
+        "energy_cost_usd": ep_cost,
+        "discomfort_deg_h": _discomfort_degree_hours(df, dt_sec),
         "length": ep_len,
     }
     return df, metrics, (comfort_low_c, comfort_high_c)
+
+
+def _plot_comparison_boxplots(
+    df: pd.DataFrame,
+    fig_path: Optional[str] = None,
+    title: str = "",
+) -> plt.Figure:
+    """
+    Two-panel box plot comparing RL vs Baseline per episode:
+      Left:  Energy cost (USD / episode)
+      Right: Discomfort (°C·h / episode)
+
+    Each dot is one evaluation episode — shows spread, not just means.
+    """
+    fig, (ax_cost, ax_comfort) = plt.subplots(1, 2, figsize=(10, 6))
+    fig.suptitle(title, fontsize=13, fontweight="bold")
+
+    # --- Energy cost ---
+    cost_data = [df["rl_energy_cost_usd"].to_numpy(), df["baseline_energy_cost_usd"].to_numpy()]
+    bp1 = ax_cost.boxplot(cost_data, labels=["RL", "Baseline"], patch_artist=True, widths=0.5)
+    bp1["boxes"][0].set_facecolor("#4c9be8")
+    bp1["boxes"][1].set_facecolor("#f4a261")
+    for i, (col, x) in enumerate(zip(["rl_energy_cost_usd", "baseline_energy_cost_usd"], [1, 2])):
+        jitter = np.random.default_rng(0).uniform(-0.08, 0.08, size=len(df))
+        ax_cost.scatter(x + jitter, df[col], color="black", s=18, alpha=0.6, zorder=3)
+    ax_cost.set_ylabel("Energy cost (USD / episode)")
+    ax_cost.set_title("Energy cost")
+    ax_cost.grid(axis="y", alpha=0.3)
+
+    # --- Discomfort ---
+    dis_data = [df["rl_discomfort_deg_h"].to_numpy(), df["baseline_discomfort_deg_h"].to_numpy()]
+    bp2 = ax_comfort.boxplot(dis_data, labels=["RL", "Baseline"], patch_artist=True, widths=0.5)
+    bp2["boxes"][0].set_facecolor("#4c9be8")
+    bp2["boxes"][1].set_facecolor("#f4a261")
+    for i, (col, x) in enumerate(zip(["rl_discomfort_deg_h", "baseline_discomfort_deg_h"], [1, 2])):
+        jitter = np.random.default_rng(1).uniform(-0.08, 0.08, size=len(df))
+        ax_comfort.scatter(x + jitter, df[col], color="black", s=18, alpha=0.6, zorder=3)
+    ax_comfort.set_ylabel("Discomfort (°C·h / episode)")
+    ax_comfort.set_title("Thermal discomfort")
+    ax_comfort.grid(axis="y", alpha=0.3)
+
+    plt.tight_layout()
+
+    if fig_path is not None:
+        plt.savefig(fig_path, dpi=150, bbox_inches="tight")
+        print(f"Saved comparison boxplots: {fig_path}")
+
+    return fig
 
 
 def _compare_period_rl_vs_baseline(
@@ -1100,6 +1175,7 @@ def _compare_period_rl_vs_baseline(
         baseline = ThermostatBaselineController(
             comfort_band_k=env_b.comfort_band_k,
             working_hours=env_b.working_hours,
+            night_setback_k=getattr(env_b, "night_setback_k", 0.0),
         )
         b_df, b_m, _ = _run_episode_trace(
             env_b,
@@ -1135,6 +1211,10 @@ def _compare_period_rl_vs_baseline(
             "baseline_comfort_penalty": b_m["comfort_penalty"],
             "rl_energy": rl_m["energy"],
             "baseline_energy": b_m["energy"],
+            "rl_energy_cost_usd": rl_m["energy_cost_usd"],
+            "baseline_energy_cost_usd": b_m["energy_cost_usd"],
+            "rl_discomfort_deg_h": rl_m["discomfort_deg_h"],
+            "baseline_discomfort_deg_h": b_m["discomfort_deg_h"],
             "episode_length": rl_m["length"],
         }
         rows.append(row)
@@ -1156,9 +1236,19 @@ def _compare_period_rl_vs_baseline(
         "baseline_comfort_mean": float(df["baseline_comfort_penalty"].mean()),
         "rl_energy_mean": float(df["rl_energy"].mean()),
         "baseline_energy_mean": float(df["baseline_energy"].mean()),
+        "rl_energy_cost_usd_mean": float(df["rl_energy_cost_usd"].mean()),
+        "baseline_energy_cost_usd_mean": float(df["baseline_energy_cost_usd"].mean()),
+        "rl_discomfort_deg_h_mean": float(df["rl_discomfort_deg_h"].mean()),
+        "baseline_discomfort_deg_h_mean": float(df["baseline_discomfort_deg_h"].mean()),
         "rl_reward_std": float(df["rl_reward"].std(ddof=0)),
-        "baseline_reward_std": float(df["baseline_reward"].std(ddof=0))
+        "baseline_reward_std": float(df["baseline_reward"].std(ddof=0)),
     }
+
+    _plot_comparison_boxplots(
+        df,
+        fig_path=os.path.join(period_dir, f"{period_name}_comparison_boxplots.png"),
+        title=f"{period_name.upper()} — RL vs Baseline",
+    )
 
     df.to_csv(os.path.join(period_dir, f"{period_name}_episode_metrics.csv"), index=False)
     pd.DataFrame([summary]).to_csv(os.path.join(period_dir, f"{period_name}_summary.csv"), index=False)
@@ -1268,36 +1358,31 @@ def _plot_training_curve(
     fig_path: Optional[str] = None,
     window: int = 20,
 ) -> plt.Figure:
-    """Plot episode reward over training timesteps with smoothed trend and val/test reference lines."""
+    """Plot episode reward over training timesteps with smoothed trend."""
     fig, ax = plt.subplots(figsize=(14, 5))
 
     ts = np.array(timesteps)
     rs = np.array(episode_rewards)
 
-    ax.plot(ts, rs, color="tab:blue", alpha=0.25, linewidth=0.8, label="Episode reward")
+    # Raw episode reward (faint)
+    ax.plot(ts, rs, color="tab:blue", alpha=0.3, linewidth=0.8, label="Episode reward")
 
-    # Smoothed moving average
-    if len(rs) >= window:
-        kernel = np.ones(window) / window
-        smoothed = np.convolve(rs, kernel, mode="valid")
-        smooth_ts = ts[window - 1:]
-        ax.plot(smooth_ts, smoothed, color="tab:blue", linewidth=2.0,
-                label=f"Smoothed (window={window})")
-
-    # Val and test mean reward as horizontal reference lines
-    ax.axhline(val_summary["rl_reward_mean"], color="tab:orange", linestyle="--", linewidth=1.5,
-               label=f"Val RL mean ({val_summary['rl_reward_mean']:.1f})")
-    ax.axhline(val_summary["baseline_reward_mean"], color="tab:orange", linestyle=":",
-               linewidth=1.2, label=f"Val baseline mean ({val_summary['baseline_reward_mean']:.1f})")
-    ax.axhline(test_summary["rl_reward_mean"], color="tab:red", linestyle="--", linewidth=1.5,
-               label=f"Test RL mean ({test_summary['rl_reward_mean']:.1f})")
-    ax.axhline(test_summary["baseline_reward_mean"], color="tab:red", linestyle=":",
-               linewidth=1.2, label=f"Test baseline mean ({test_summary['baseline_reward_mean']:.1f})")
+    # Smoothed moving average — window as fraction of total episodes so it scales sensibly
+    w = max(5, min(window, len(rs) // 5))
+    if len(rs) >= w:
+        kernel = np.ones(w) / w
+        smoothed = np.convolve(rs, kernel, mode="same")
+        # convolve "same" distorts edges — mask first and last w//2 points
+        mask = np.ones(len(rs), dtype=bool)
+        mask[:w // 2] = False
+        mask[-(w // 2):] = False
+        ax.plot(ts[mask], smoothed[mask], color="tab:blue", linewidth=2.2,
+                label=f"Smoothed (window={w})")
 
     ax.set_xlabel("Timesteps")
     ax.set_ylabel("Episode reward")
     ax.set_title("Training curve — episode reward over time")
-    ax.legend(fontsize=8, ncol=2)
+    ax.legend(fontsize=9)
     ax.grid(alpha=0.25)
     plt.tight_layout()
 
@@ -1409,17 +1494,23 @@ def _plot_episode_trace_6panel(
     ax_room, ax_out, ax_pen, ax_energy, ax_cost, ax_reward, ax_act = axes
 
     # --- 1) Room temperature ---
-    working_hours = (8.0, 18.0)
-    # _shade_working_hours(ax_room, df["timestamp"], working_hours=working_hours)
+    # Use per-step comfort band columns if available (supports night setback), else fall back to static
+    if "comfort_low_c" in df.columns and df["comfort_low_c"].notna().any():
+        cb_low  = df["comfort_low_c"]
+        cb_high = df["comfort_high_c"]
+    else:
+        cb_low  = pd.Series([comfort_low_c]  * len(df), index=df.index)
+        cb_high = pd.Series([comfort_high_c] * len(df), index=df.index)
+
     ax_room.plot(df["timestamp"], df["room_temp_c"],
                  label="Room temp (°C)", linewidth=2, color="tab:blue")
-    ax_room.axhline(comfort_low_c,  color="green", linestyle="--", linewidth=1.2,
-                    label=f"Comfort low ({comfort_low_c:.1f}°C)")
-    ax_room.axhline(comfort_high_c, color="red",   linestyle="--", linewidth=1.2,
-                    label=f"Comfort high ({comfort_high_c:.1f}°C)")
+    ax_room.plot(df["timestamp"], cb_low,  color="green", linestyle="--", linewidth=1.2,
+                 label="Comfort low (°C, night setback)")
+    ax_room.plot(df["timestamp"], cb_high, color="red",   linestyle="--", linewidth=1.2,
+                 label="Comfort high (°C)")
     ax_room.fill_between(
-        df["timestamp"], comfort_low_c, comfort_high_c,
-        alpha=0.07, color="green", label="Comfort band",
+        df["timestamp"], cb_low, cb_high,
+        alpha=0.10, color="green", label="Comfort band",
     )
     ax_room.set_ylabel("Room temp (°C)")
     ax_room.set_title(title, fontsize=13, fontweight="bold")
