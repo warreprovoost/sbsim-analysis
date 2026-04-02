@@ -42,3 +42,4 @@
 - I let the test start in the night. Is this not beneficial
 - Carbon cost is also a meassure availble in sbsim. Train on carbon cost/comfort. Something nice to add.
 - Increase gas prices more to make it more relevant.
+- Start with the writing
