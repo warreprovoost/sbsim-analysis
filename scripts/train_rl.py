@@ -62,13 +62,13 @@ PRESETS = {
         description="Full comfort training — 100k steps, 7-day episodes, 1 eval episode",
     ),
     "full": dict(
-        total_timesteps=500_000,
-        chunk_timesteps=10_000,
+        total_timesteps=1_000_000,
+        chunk_timesteps=50_000,   # ~5 full episodes per chunk (1 episode = 10,080 steps at 60s/7days)
         episode_days=7,
-        n_eval_episodes=2,
+        n_eval_episodes=10,
         training_mode="full",
         eval_training_mode="full",
-        description="Full training with energy penalty — 500k steps, 7-day episodes, 60s timestep",
+        description="Full training with energy penalty — 1M steps, 7-day episodes, 60s timestep",
     ),
     "full_eval1": dict(
         total_timesteps=500_000,
@@ -138,6 +138,24 @@ def parse_args():
         help="W&B project name. Set to '' to disable W&B.",
     )
     parser.add_argument(
+        "--floorplan",
+        choices=["single_room", "office_4room", "corporate_floor", "headquarters_floor"],
+        default="single_room",
+        help="Building floorplan to use.",
+    )
+    parser.add_argument(
+        "--energy_weight",
+        type=float,
+        default=1.0,
+        help="Comfort/energy trade-off: 0.5=comfort-focused, 1.0=balanced, 2.0=energy-focused.",
+    )
+    parser.add_argument(
+        "--action_design",
+        choices=["reheat_per_zone", "damper_per_zone", "full_per_zone"],
+        default="reheat_per_zone",
+        help="Action space design: reheat_per_zone (cold), damper_per_zone (warm), full_per_zone (both).",
+    )
+    parser.add_argument(
         "--no_compare",
         action="store_true",
         help="Skip RL vs baseline comparison after training.",
@@ -160,15 +178,35 @@ def main():
     weather_csv = os.path.expanduser(args.weather_csv)
 
     if args.output_dir is None:
-        base_dir = f"{args.mode}_{args.algo}_seed{args.seed}"
+        ew_str = f"_ew{str(args.energy_weight).replace('.', '')}"
+        base_dir = f"{args.mode}_{args.algo}_seed{args.seed}{ew_str}"
         if args.unique_run:
-            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
             base_dir = f"{base_dir}_{ts}"
         output_dir = os.path.join(THESIS_ROOT, "results", base_dir)
     else:
         output_dir = os.path.expanduser(args.output_dir)
 
     os.makedirs(output_dir, exist_ok=True)
+
+    # Save full run config immediately so it's available even if the run crashes
+    import json
+    run_config = {
+        "mode":         args.mode,
+        "algo":         args.algo,
+        "seed":         args.seed,
+        "floorplan":     args.floorplan,
+        "energy_weight": args.energy_weight,
+        "action_design": args.action_design,
+        "weather_csv":  args.weather_csv,
+        "output_dir":   output_dir,
+        "wandb_project": args.wandb_project,
+        **{k: v for k, v in preset.items() if k != "description"},
+        "description":  preset["description"],
+        "started_at":   datetime.datetime.now().isoformat(),
+    }
+    with open(os.path.join(output_dir, "run_config.json"), "w") as f:
+        json.dump(run_config, f, indent=2)
 
     print("=" * 60)
     print(f"  Mode:        {args.mode}")
@@ -177,6 +215,9 @@ def main():
     print(f"  Seed:        {args.seed}")
     print(f"  Output dir:  {output_dir}")
     print(f"  Weather:     {args.weather_csv}")
+    print(f"  Floorplan:   {args.floorplan}")
+    print(f"  Energy weight: {args.energy_weight}")
+    print(f"  Action design: {args.action_design}")
     print(f"  W&B project: {args.wandb_project or 'DISABLED'}")
     print("=" * 60)
 
@@ -213,8 +254,11 @@ def main():
         output_dir=output_dir,
         training_mode=preset["training_mode"],
         eval_training_mode=preset["eval_training_mode"],
-        n_eval_episodes=preset["n_eval_episodes"],
+        n_eval_episodes=min(2, preset["n_eval_episodes"]),
         n_envs=args.n_envs,
+        floorplan=args.floorplan,
+        energy_weight=args.energy_weight,
+        action_design=args.action_design,
         wandb_run=wandb_run,
         wandb_finish=False,  # keep run alive for compare logging
     )
@@ -255,6 +299,10 @@ def main():
     if wandb_run is not None:
         import wandb
         wandb.finish()
+
+    run_config["finished_at"] = datetime.datetime.now().isoformat()
+    with open(os.path.join(output_dir, "run_config.json"), "w") as f:
+        json.dump(run_config, f, indent=2)
 
     print(f"\nDone. Results saved to: {output_dir}")
 

@@ -723,14 +723,22 @@ def _sample_start_in_period(
     end: str,
     episode_days: int,
     time_zone: str,
+    start_hour: int = 0,
 ) -> pd.Timestamp:
-    s = pd.Timestamp(start, tz=time_zone)
-    e = pd.Timestamp(end, tz=time_zone)
+    """Sample a random start day in [start, end], always at start_hour local time.
+
+    Starting at 00:00 (default) gives the building 8 hours to reach comfort temperature
+    before working hours begin, avoiding a cold-start penalty spike at episode start.
+    """
+    s = pd.Timestamp(start, tz=time_zone).normalize()  # midnight of start date
+    e = pd.Timestamp(end, tz=time_zone).normalize()
     latest = e - pd.Timedelta(days=episode_days)
     if latest <= s:
         raise ValueError("Period too short for requested episode_days.")
-    frac = rng.random()
-    return s + (latest - s) * frac
+    # sample a random day index
+    n_days = int((latest - s).days)
+    day_offset = int(rng.integers(0, n_days + 1))
+    return s + pd.Timedelta(days=day_offset, hours=start_hour)
 
 
 def _evaluate_period_random_starts(
@@ -801,13 +809,16 @@ def run_rl_setup(
     training_mode: str = "full",
     eval_training_mode: Optional[str] = None,
     n_eval_episodes: int = 8,
+    floorplan: str = "single_room",
+    energy_weight: float = 2.0,
+    action_design: str = "reheat_per_zone",
     wandb_finish: bool = True,
     train_period_start: str = "2019-11-01",
     train_period_end: str = "2023-11-01",
     val_period_start: str = "2023-11-01",
-    val_period_end: str = "2023-11-30",
+    val_period_end: str = "2023-11-23",  # keep 7 days clear of val/test boundary
     test_period_start: str = "2023-11-30",
-    test_period_end: str = "2023-12-31",
+    test_period_end: str = "2023-12-24",  # keep 7 days clear of CSV end (2023-12-31)
     **train_kwargs,
 ) -> Dict[str, Any]:
     os.makedirs(output_dir, exist_ok=True)
@@ -823,6 +834,9 @@ def run_rl_setup(
     base["weather_csv_path"] = weather_csv_path
     base["time_zone"] = "America/Los_Angeles"
     base["time_step_sec"] = int(base.get("time_step_sec", 300))
+    base["floorplan"] = floorplan
+    base["energy_weight"] = energy_weight
+    base["action_design"] = action_design
 
     max_steps = int(episode_days * 24 * 3600 / base["time_step_sec"])
     base["max_steps"] = max_steps
@@ -962,10 +976,10 @@ def _merge_factory_kwargs(
 def _extract_action_channels(action: np.ndarray) -> Dict[str, float]:
     a = np.asarray(action, dtype=np.float32).flatten()
     return {
-        "action_supply": float(a[0]) if len(a) > 0 else np.nan,
-        "action_boiler": float(a[1]) if len(a) > 1 else np.nan,
-        "action_damper": float(a[2]) if len(a) > 2 else np.nan,
-        "action_reheat_mean": float(np.mean(a[3:])) if len(a) > 3 else np.nan,
+        "action_supply":       float(a[0]) if len(a) > 0 else np.nan,
+        "action_boiler":       float(a[1]) if len(a) > 1 else np.nan,
+        "action_reheat":       float(a[2]) if len(a) > 2 else np.nan,   # shared reheat
+        "action_damper_mean":  float(np.mean(a[3:])) if len(a) > 3 else np.nan,  # mean per-zone damper
     }
 
 
@@ -1014,7 +1028,10 @@ def _run_episode_trace(
 
         ts = env.sim.current_timestamp
         zone_temps_k = env.sim.building.get_zone_average_temps()
-        room_temp_c = float(np.mean(list(zone_temps_k.values())) - 273.15)
+        zone_temps_c = [v - 273.15 for v in zone_temps_k.values()]
+        room_temp_c     = float(np.mean(zone_temps_c))
+        room_temp_min_c = float(np.min(zone_temps_c))
+        room_temp_max_c = float(np.max(zone_temps_c))
         outside_temp_c = float(
             env.air_handler.get_observation("outside_air_temperature_sensor", ts) - 273.15
         )
@@ -1022,7 +1039,9 @@ def _run_episode_trace(
         row = {
             "timestamp": ts,
             "policy": policy_name,
-            "room_temp_c": room_temp_c,
+            "room_temp_c":     room_temp_c,
+            "room_temp_min_c": room_temp_min_c,
+            "room_temp_max_c": room_temp_max_c,
             "outside_temp_c": outside_temp_c,
             "comfort_penalty": float(info.get("comfort_penalty", 0.0)),
             "energy_rate": float(info.get("energy_rate", 0.0)),
@@ -1087,9 +1106,6 @@ def _plot_comparison_boxplots(
     bp1 = ax_cost.boxplot(cost_data, labels=["RL", "Baseline"], patch_artist=True, widths=0.5)
     bp1["boxes"][0].set_facecolor("#4c9be8")
     bp1["boxes"][1].set_facecolor("#f4a261")
-    for i, (col, x) in enumerate(zip(["rl_energy_cost_usd", "baseline_energy_cost_usd"], [1, 2])):
-        jitter = np.random.default_rng(0).uniform(-0.08, 0.08, size=len(df))
-        ax_cost.scatter(x + jitter, df[col], color="black", s=18, alpha=0.6, zorder=3)
     ax_cost.set_ylabel("Energy cost (USD / episode)")
     ax_cost.set_title("Energy cost")
     ax_cost.grid(axis="y", alpha=0.3)
@@ -1099,9 +1115,6 @@ def _plot_comparison_boxplots(
     bp2 = ax_comfort.boxplot(dis_data, labels=["RL", "Baseline"], patch_artist=True, widths=0.5)
     bp2["boxes"][0].set_facecolor("#4c9be8")
     bp2["boxes"][1].set_facecolor("#f4a261")
-    for i, (col, x) in enumerate(zip(["rl_discomfort_deg_h", "baseline_discomfort_deg_h"], [1, 2])):
-        jitter = np.random.default_rng(1).uniform(-0.08, 0.08, size=len(df))
-        ax_comfort.scatter(x + jitter, df[col], color="black", s=18, alpha=0.6, zorder=3)
     ax_comfort.set_ylabel("Discomfort (°C·h / episode)")
     ax_comfort.set_title("Thermal discomfort")
     ax_comfort.grid(axis="y", alpha=0.3)
@@ -1150,7 +1163,12 @@ def _compare_period_rl_vs_baseline(
             end=period_end,
             episode_days=episode_days,
             time_zone=p["time_zone"],
+            start_hour=0,  # always start at midnight — 8h warmup before working hours
         ).isoformat()
+
+        # Start building at comfort band midpoint so there is no cold-start penalty spike
+        comfort_band_k = p.get("comfort_band_k", (294.15, 295.15))
+        p["initial_temp_celsius"] = 0.5 * (comfort_band_k[0] + comfort_band_k[1]) - 273.15
 
         max_steps = int(episode_days * 24 * 3600 / p["time_step_sec"])
         p["max_steps"] = max_steps
@@ -1275,9 +1293,9 @@ def compare_rl_vs_baseline(
     n_plot_episodes: int = 2,
     verbose: bool = True,
     val_period_start: str = "2023-11-01",
-    val_period_end: str = "2023-11-30",
+    val_period_end: str = "2023-11-23",  # keep 7 days clear of val/test boundary
     test_period_start: str = "2023-11-30",
-    test_period_end: str = "2023-12-31",
+    test_period_end: str = "2023-12-24",  # keep 7 days clear of CSV end (2023-12-31)
 ) -> Dict[str, Any]:
     """
     Compare trained RL policy vs thermostat baseline on winter val/test splits.
@@ -1394,80 +1412,6 @@ def _plot_training_curve(
 
     return fig
 
-
-def _plot_episode_trace_4panel(
-    df: pd.DataFrame,
-    comfort_band_c: Tuple[float, float],
-    title: str = "",
-    fig_path: Optional[str] = None,
-    figsize: Tuple[int, int] = (16, 12),
-) -> plt.Figure:
-    """Plot a 4-panel episode trace: room temp, outside temp, comfort penalty, actions."""
-    comfort_low_c, comfort_high_c = comfort_band_c
-
-    fig, (ax_room, ax_out, ax_pen, ax_act) = plt.subplots(
-        4, 1, figsize=figsize, sharex=True,
-        gridspec_kw={"height_ratios": [2.0, 1.4, 1.2, 1.5]},
-    )
-
-    # --- 1) Room temperature ---
-    working_hours = (8.0, 18.0)
-    _shade_working_hours(ax_room, df["timestamp"], working_hours=working_hours)
-    ax_room.plot(df["timestamp"], df["room_temp_c"], label="Room temp (°C)", linewidth=2, color="tab:blue")
-    ax_room.axhline(comfort_low_c, color="green", linestyle="--", linewidth=1.2, label=f"Comfort low ({comfort_low_c:.1f}°C)")
-    ax_room.axhline(comfort_high_c, color="red",   linestyle="--", linewidth=1.2, label=f"Comfort high ({comfort_high_c:.1f}°C)")
-    ax_room.set_ylabel("Room temp (°C)")
-    ax_room.set_title(title)
-    ax_room.grid(alpha=0.25)
-    ax_room.legend(loc="upper right")
-
-    # --- 2) Outside temperature ---
-    ax_out.plot(df["timestamp"], df["outside_temp_c"], label="Outside temp (°C)", linewidth=1.8, color="tab:orange")
-    ax_out.set_ylabel("Outside (°C)")
-    ax_out.grid(alpha=0.25)
-    ax_out.legend(loc="upper right")
-
-    # --- 3) Comfort penalty ---
-    ax_pen.plot(df["timestamp"], df["comfort_penalty"], color="black", linewidth=1.5, label="Comfort penalty")
-    ax_pen.set_ylabel("Penalty")
-    ax_pen.grid(alpha=0.25)
-    ax_pen.legend(loc="upper right")
-
-    # --- 4) Actions ---
-    if "action_supply" in df.columns:
-        ax_act.step(df["timestamp"], df["action_supply"],      where="post", label="Supply",      linewidth=1.4)
-    if "action_boiler" in df.columns:
-        ax_act.step(df["timestamp"], df["action_boiler"],      where="post", label="Boiler",      linewidth=1.4)
-    if "action_damper" in df.columns:
-        ax_act.step(df["timestamp"], df["action_damper"],      where="post", label="Damper",      linewidth=1.4)
-    if "action_reheat_mean" in df.columns:
-        ax_act.step(df["timestamp"], df["action_reheat_mean"], where="post", label="Reheat mean", linewidth=1.4)
-    ax_act.set_ylabel("Action value")
-    ax_act.set_xlabel("Timestamp")
-    ax_act.set_ylim(-1.1, 1.1)
-    ax_act.grid(alpha=0.25)
-    ax_act.legend(loc="upper right", ncol=2)
-
-    # x-axis formatting
-    ax_act.xaxis.set_major_locator(mdates.HourLocator(interval=12))
-    ax_act.xaxis.set_major_formatter(mdates.DateFormatter("%a %m-%d %H:%M"))
-    ax_act.xaxis.set_minor_locator(mdates.HourLocator(interval=3))
-    plt.setp(ax_act.get_xticklabels(), rotation=30, ha="right")
-
-    if not df.empty:
-        ax_act.set_xlim(
-            df["timestamp"].min(),
-            df["timestamp"].max() + pd.Timedelta(hours=6),
-        )
-
-    plt.tight_layout()
-
-    if fig_path is not None:
-        plt.savefig(fig_path, dpi=150, bbox_inches="tight")
-        print(f"Saved plot: {fig_path}")
-
-    return fig
-
 def _plot_episode_trace_6panel(
     df: pd.DataFrame,
     comfort_band_c: Tuple[float, float],
@@ -1502,16 +1446,25 @@ def _plot_episode_trace_6panel(
         cb_low  = pd.Series([comfort_low_c]  * len(df), index=df.index)
         cb_high = pd.Series([comfort_high_c] * len(df), index=df.index)
 
+    # Comfort band (green shading)
+    ax_room.fill_between(df["timestamp"], cb_low, cb_high,
+                         alpha=0.12, color="green", label="Comfort band")
+    ax_room.plot(df["timestamp"], cb_low,  color="green", linestyle="--", linewidth=1.0,
+                 label="Comfort low (night setback)")
+    ax_room.plot(df["timestamp"], cb_high, color="red",   linestyle="--", linewidth=1.0,
+                 label="Comfort high")
+
+    # Zone temperature band (min–max shading) + mean line
+    if "room_temp_min_c" in df.columns and "room_temp_max_c" in df.columns:
+        ax_room.fill_between(df["timestamp"], df["room_temp_min_c"], df["room_temp_max_c"],
+                             alpha=0.18, color="tab:blue", label="Zone temp range")
+        ax_room.plot(df["timestamp"], df["room_temp_min_c"],
+                     color="tab:blue", linewidth=0.7, linestyle=":", alpha=0.6)
+        ax_room.plot(df["timestamp"], df["room_temp_max_c"],
+                     color="tab:blue", linewidth=0.7, linestyle=":", alpha=0.6)
     ax_room.plot(df["timestamp"], df["room_temp_c"],
-                 label="Room temp (°C)", linewidth=2, color="tab:blue")
-    ax_room.plot(df["timestamp"], cb_low,  color="green", linestyle="--", linewidth=1.2,
-                 label="Comfort low (°C, night setback)")
-    ax_room.plot(df["timestamp"], cb_high, color="red",   linestyle="--", linewidth=1.2,
-                 label="Comfort high (°C)")
-    ax_room.fill_between(
-        df["timestamp"], cb_low, cb_high,
-        alpha=0.10, color="green", label="Comfort band",
-    )
+                 label="Zone temp mean", linewidth=1.8, color="tab:blue")
+
     ax_room.set_ylabel("Room temp (°C)")
     ax_room.set_title(title, fontsize=13, fontweight="bold")
     ax_room.grid(alpha=0.25)
@@ -1592,8 +1545,8 @@ def _plot_episode_trace_6panel(
     action_cols = {
         "action_supply":      "Supply air",
         "action_boiler":      "Boiler",
-        "action_damper":      "Damper",
-        "action_reheat_mean": "Reheat mean",
+        "action_reheat":      "Reheat (shared)",
+        "action_damper_mean": "Damper mean",
     }
     for col, lbl in action_cols.items():
         if col in df.columns:

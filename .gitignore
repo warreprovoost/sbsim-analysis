@@ -4,6 +4,7 @@ poetry.lock
 smart_control_analysis/experiment_results/
 notebooks/experiment_results/
 wandb/
+wandb
 # Python
 __pycache__/
 *.py[cod]

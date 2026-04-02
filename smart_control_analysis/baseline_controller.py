@@ -84,72 +84,69 @@ class ThermostatBaselineController:
         zone_temps_k = np.array([zone_temps_dict[zid] for zid in env.zone_ids], dtype=np.float32)
         zone_occupancies = np.ones(n_zones, dtype=np.float32)  # always occupied
 
-        action = np.zeros(3 + n_zones, dtype=np.float32)
+        action_design = getattr(env, "action_design", "reheat_per_zone")
+        if action_design == "full_per_zone":
+            action = np.zeros(2 + 2 * n_zones, dtype=np.float32)
+        else:
+            action = np.zeros(3 + n_zones, dtype=np.float32)
 
         if not self._is_working_hours(timestamp):
             self._boiler_on = False
             self._boiler_state_initialized = False
             self._boiler_steps_since_switch = 0
-            # Outside working hours: turn everything off
-            action[0] = -1.0  # supply air low
-            action[1] = -1.0  # boiler low (idle)
-            action[2] = -1.0  # damper closed
-            action[3:] = -1.0  # all reheat off
+            action[:] = -1.0  # everything off/closed
             return action
 
-        # During working hours: maintain comfort band (with night setback if outside hours)
-        # Supply air: keep at neutral setpoint
         action[0] = 0.0  # supply_air_sp = 22°C (center)
 
-        # Boiler: heat to comfort midpoint with hysteresis
         comfort_low_k, comfort_high_k = self._comfort_band_now_k(timestamp)
         comfort_mid_k = 0.5 * (comfort_low_k + comfort_high_k)
         min_temp = float(np.min(zone_temps_k))
-        on_th = comfort_mid_k - self.boiler_on_margin_k   # ON below midpoint-0.6
-        off_th = comfort_mid_k + self.boiler_off_margin_k  # OFF above midpoint+0.6
+        on_th = comfort_mid_k - self.boiler_on_margin_k
+        off_th = comfort_mid_k + self.boiler_off_margin_k
 
-        # initialize once when entering working hours
         if not self._boiler_state_initialized:
             self._boiler_on = (min_temp < on_th)
             self._boiler_state_initialized = True
             self._boiler_steps_since_switch = 0
         else:
             self._boiler_steps_since_switch += 1
-
             if self._boiler_on:
-                # allow OFF only after minimum ON time
                 if self._boiler_steps_since_switch >= self.min_on_steps and min_temp > off_th:
                     self._boiler_on = False
                     self._boiler_steps_since_switch = 0
             else:
-                # allow ON only after minimum OFF time
                 if self._boiler_steps_since_switch >= self.min_off_steps and min_temp < on_th:
                     self._boiler_on = True
                     self._boiler_steps_since_switch = 0
 
         action[1] = 1.0 if self._boiler_on else -1.0
 
-        # Damper: open during working hours to allow airflow
-        action[2] = 1.0  # damper fully open
+        # Per-zone reheat: proportional to each zone's coldness
+        reheat_vals = np.array([
+            float(np.clip((comfort_low_k - zone_temps_k[i]) / 1.0, -1.0, 1.0))
+            for i in range(n_zones)
+        ], dtype=np.float32)
 
-        # Per-zone reheat: proportional control
-        for i in range(n_zones):
-            temp = zone_temps_k[i]
-            occ = zone_occupancies[i]
+        # Per-zone damper: open for cold zones, closed for warm zones
+        damper_vals = np.array([
+            -1.0 if zone_occupancies[i] < 0.1 or zone_temps_k[i] > comfort_high_k + 1.0
+            else (1.0 if zone_temps_k[i] < comfort_low_k
+                  else float(np.clip((comfort_low_k - zone_temps_k[i]) / 1.0, -1.0, 1.0)))
+            for i in range(n_zones)
+        ], dtype=np.float32)
 
-            if occ < 0.1:
-                # Zone unoccupied: no heating
-                action[3 + i] = -1.0
-            elif temp < comfort_low_k - 1.0:
-                # Zone too cold: full reheat
-                action[3 + i] = 1.0
-            elif temp > comfort_high_k + 1.0:
-                # Zone too hot: no reheat (let damper/AH cool)
-                action[3 + i] = -1.0
-            else:
-                # Proportional control within dead band
-                error = comfort_low_k - temp
-                reheat_cmd = np.clip(error / 1.0, -1.0, 1.0)
-                action[3 + i] = float(reheat_cmd)
+        if action_design == "reheat_per_zone":
+            # [supply, boiler, shared_damper, reheat_0..n]
+            action[2] = float(np.mean(damper_vals))   # shared damper = mean demand
+            action[3:3 + n_zones] = reheat_vals
+        elif action_design == "damper_per_zone":
+            # [supply, boiler, shared_reheat, damper_0..n]
+            action[2] = float(np.clip((comfort_low_k - min_temp) / 1.0, -1.0, 1.0))
+            action[3:3 + n_zones] = damper_vals
+        else:  # full_per_zone
+            # [supply, boiler, reheat_0..n, damper_0..n]
+            action[2:2 + n_zones] = reheat_vals
+            action[2 + n_zones:2 + 2 * n_zones] = damper_vals
 
         return action

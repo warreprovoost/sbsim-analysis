@@ -1,6 +1,5 @@
 from typing import Any, Dict, List, Optional, Tuple
 
-from smart_control_analysis.custom_sbsim.mutable_schedule import MutableSetpointSchedule
 from gymnasium import spaces
 import gymnasium as gym
 import numpy as np
@@ -33,12 +32,28 @@ class _ConstantOccupancy:
 
 class BuildingGymEnv(gym.Env):
     """
-    Action space (reduced):
-    - [0]:      supply_air_temp_setpoint  [-1,1] -> [12°C, 32°C]
-    - [1]:      boiler_setpoint           [-1,1] -> [20°C, 65°C]
-    - [2]:      shared damper             [-1,1] -> [0.01, 1.0]  (same for all zones)
-    - [3..3+n]: per-zone reheat valve     [-1,1] -> [0.0, 1.0]
-    Total: 3 + n_zones
+    Action space depends on action_design:
+
+    "reheat_per_zone" (default, cold climate):
+      [0]:      supply_air_temp_setpoint  [-1,1] -> [12°C, 32°C]
+      [1]:      boiler_setpoint           [-1,1] -> [20°C, 65°C]
+      [2]:      shared_damper             [-1,1] -> [0.01, 1.0]
+      [3..3+n]: per-zone reheat valve     [-1,1] -> [0.0, 1.0]
+      Total: 3 + n_zones
+
+    "damper_per_zone" (warm climate):
+      [0]:      supply_air_temp_setpoint  [-1,1] -> [12°C, 32°C]
+      [1]:      boiler_setpoint           [-1,1] -> [20°C, 65°C]
+      [2]:      shared_reheat             [-1,1] -> [0.0, 1.0]
+      [3..3+n]: per-zone damper           [-1,1] -> [0.01, 1.0]
+      Total: 3 + n_zones
+
+    "full_per_zone" (both, largest space):
+      [0]:      supply_air_temp_setpoint  [-1,1] -> [12°C, 32°C]
+      [1]:      boiler_setpoint           [-1,1] -> [20°C, 65°C]
+      [2..2+n]: per-zone reheat valve     [-1,1] -> [0.0, 1.0]
+      [2+n..2+2n]: per-zone damper        [-1,1] -> [0.01, 1.0]
+      Total: 2 + 2*n_zones
     """
 
     metadata = {"render_modes": ["human"]}
@@ -57,6 +72,8 @@ class BuildingGymEnv(gym.Env):
         occupancy_kwargs: Optional[Dict[str, Any]] = None,
         energy_norm: float = 500.0,  # W — expected peak *total* energy for this building
         use_cost_reward: bool = False,  # if True, use monetary cost (USD/step) instead of W
+        energy_weight: float = 2.0,  # comfort/energy trade-off: higher = more energy penalty
+        action_design: str = "reheat_per_zone",  # "reheat_per_zone" | "damper_per_zone" | "full_per_zone"
     ):
         super().__init__()
         self.sim = sim
@@ -83,6 +100,10 @@ class BuildingGymEnv(gym.Env):
         # EMA slowly raises the norm if the sim regularly exceeds the initial estimate.
         self._energy_norm: float = float(energy_norm)  # fixed — set from physics in building_factory
         self.use_cost_reward = use_cost_reward
+        self.energy_weight = float(energy_weight)
+        if action_design not in ("reheat_per_zone", "damper_per_zone", "full_per_zone"):
+            raise ValueError(f"Unknown action_design: {action_design!r}")
+        self.action_design = action_design
 
         # Pre-extract scalar prices ($/J for gas, $/Ws for elec) to avoid pint overhead per step.
         # NaturalGasEnergyCost stores _month_gas_price as plain np.array ($/J).
@@ -90,7 +111,11 @@ class BuildingGymEnv(gym.Env):
         self._gas_price_per_j: np.ndarray = _gas_obj._month_gas_price  # shape (12,), $/J
 
         # ElectricityEnergyCost stores prices as pint quantities → extract .magnitude ($/Ws).
-        _elec_obj = ElectricityEnergyCost(weekday_energy_prices=WEEKDAY_PRICE_BY_HOUR, weekend_energy_prices=WEEKEND_PRICE_BY_HOUR)
+        # Suppress UnitStrippedWarning fired during construction (pint internals, not our code).
+        import warnings
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message="The unit of the quantity is stripped")
+            _elec_obj = ElectricityEnergyCost(weekday_energy_prices=WEEKDAY_PRICE_BY_HOUR, weekend_energy_prices=WEEKEND_PRICE_BY_HOUR)
         self._elec_weekday: np.ndarray = np.array([v.magnitude if hasattr(v, 'magnitude') else float(v)
                                                    for v in _elec_obj._weekday_energy_prices])  # (24,) $/Ws
         self._elec_weekend: np.ndarray = np.array([v.magnitude if hasattr(v, 'magnitude') else float(v)
@@ -98,7 +123,7 @@ class BuildingGymEnv(gym.Env):
 
         # Cost norm: peak cost per step at 60s timestep.
         # Peak boiler (113W gas, Jan) + blower (30W elec peak) for 60s ≈ $0.000161
-        # With energy_weight=2.0: peak penalty = 2.0 * 0.000161/0.000161 = 2.0
+        # With energy_weight=1.0: peak penalty = 1.0 * 0.000161/0.000161 = 1.0 (= a 1°C violation)
         self._cost_norm: float = 0.000161
 
         zone_temps_dict = self.sim.building.get_zone_average_temps()
@@ -107,26 +132,27 @@ class BuildingGymEnv(gym.Env):
 
         self.occupancies = self._build_occupancies(seed=seed)
 
-        self._last_shared_damper_cmd = np.float32(0.5)
         self._last_reheat_cmds = np.zeros(self.n_zones, dtype=np.float32)
+        self._last_damper_cmds = np.zeros(self.n_zones, dtype=np.float32)
         self._last_ambient_temp_c: float = 0.0  # for ambient trend feature
         self._last_action: Optional[np.ndarray] = None  # for action smoothness penalty
 
-
-        # action: [ah_supply, boiler, vav_1_damper, vav_2_damper, ..., vav_1_reheat, vav_2_reheat, ...]
-        # 2 shared + 2 per zone
+        # action space size depends on design
+        if self.action_design == "full_per_zone":
+            n_actions = 2 + 2 * self.n_zones
+        else:
+            n_actions = 3 + self.n_zones  # one shared + n per-zone
         self.action_space = spaces.Box(
             low=-1.0, high=1.0,
-            shape=(3 + self.n_zones,),
+            shape=(n_actions,),
             dtype=np.float32,
         )
         self._forecast_hours = [1, 3, 6]  # hours ahead for weather forecast features
+        # obs: temps(n) + errors(n) + reheat_cmds(n) + damper_cmds(n) + time(5)
+        #      + [supply_air_sp, boiler_sp, ambient, ambient_trend](4) + forecast(3)
         self.observation_space = spaces.Box(
             low=-1e3, high=1e4,
-            # temps(n) + temp_errors(n) + reheat_cmds(n) + time_feats(5)
-            # + [supply_air_sp, boiler_sp, ambient, ambient_trend, damper](5)
-            # + forecast_temps(3): outdoor temp at +1h, +3h, +6h
-            shape=(self.n_zones * 3 + 13,),
+            shape=(self.n_zones * 4 + 12,),
             dtype=np.float32,
         )
         # convenience references
@@ -229,21 +255,21 @@ class BuildingGymEnv(gym.Env):
         temps_norm = np.clip((temps_c - (comfort_mid_c)) / 8.0, -1.0, 1.0).astype(np.float32)
 
         return np.concatenate([
-            temps_norm,                                   # n  zone temp normalised to [-1,1]
-            temp_errors_norm,                             # n  comfort error normalised to [-1,1]
-            self._last_reheat_cmds.astype(np.float32),    # n  last reheat valve positions [-1,1] already
-            time_feats,                                   # 5  sin/cos ∈ [-1,1], weekend ∈ {0,1}
+            temps_norm,                                    # n  zone temp normalised to [-1,1]
+            temp_errors_norm,                              # n  comfort error normalised to [-1,1]
+            self._last_reheat_cmds.astype(np.float32),     # n  last per-zone reheat cmds [-1,1]
+            self._last_damper_cmds.astype(np.float32),     # n  last per-zone damper cmds [-1,1]
+            time_feats,                                    # 5  sin/cos ∈ [-1,1], weekend ∈ {0,1}
             np.array(
                 [
-                    supply_air_sp,                        # [-1, 1] normalised setpoint
-                    boiler_sp,                            # [-1, 1] normalised setpoint
-                    ambient_norm,                         # [-1, 1] outdoor temp
-                    ambient_trend_norm,                   # [-1, 1] temp change since last step
-                    self._last_shared_damper_cmd,         # [-1, 1] damper position
+                    supply_air_sp,                         # [-1, 1] normalised setpoint
+                    boiler_sp,                             # [-1, 1] normalised setpoint
+                    ambient_norm,                          # [-1, 1] outdoor temp
+                    ambient_trend_norm,                    # [-1, 1] temp change since last step
                 ],
                 dtype=np.float32,
-            ),                                            # 5
-            forecast_norm,                                # 3  forecast temps normalised to [-1,1]
+            ),                                             # 4
+            forecast_norm,                                 # 3  forecast temps normalised to [-1,1]
         ])
 
     def reset(self, *, seed: Optional[int] = None, options: Optional[Dict] = None) -> Tuple[np.ndarray, Dict]:
@@ -253,8 +279,8 @@ class BuildingGymEnv(gym.Env):
 
         self.occupancies = self._build_occupancies(seed=seed)
         self.step_count = 0
-        self._last_shared_damper_cmd = np.float32(0.5)
         self._last_reheat_cmds = np.zeros(self.n_zones, dtype=np.float32)
+        self._last_damper_cmds = np.zeros(self.n_zones, dtype=np.float32)
         self._last_ambient_temp_c = 0.0
         self._last_action = None
         # Keep norms across resets so they accumulate over training episodes.
@@ -265,13 +291,25 @@ class BuildingGymEnv(gym.Env):
     def step(self, action: np.ndarray):
         prev_action = self._last_action
         action = np.asarray(action, dtype=np.float32).ravel()
-        assert action.size == 3 + self.n_zones
         self._last_action = action.copy()
 
-        supply_air_action  = action[0]
-        boiler_action      = action[1]
-        shared_damper      = action[2]
-        vav_reheat_actions = action[3:3 + self.n_zones]
+        supply_air_action = action[0]
+        boiler_action     = action[1]
+
+        if self.action_design == "reheat_per_zone":
+            # [supply, boiler, shared_damper, reheat_0..n]
+            shared_damper_action   = action[2]
+            vav_reheat_actions     = action[3:3 + self.n_zones]
+            vav_damper_actions     = np.full(self.n_zones, shared_damper_action, dtype=np.float32)
+        elif self.action_design == "damper_per_zone":
+            # [supply, boiler, shared_reheat, damper_0..n]
+            shared_reheat_action   = action[2]
+            vav_damper_actions     = action[3:3 + self.n_zones]
+            vav_reheat_actions     = np.full(self.n_zones, shared_reheat_action, dtype=np.float32)
+        else:  # full_per_zone
+            # [supply, boiler, reheat_0..n, damper_0..n]
+            vav_reheat_actions     = action[2:2 + self.n_zones]
+            vav_damper_actions     = action[2 + self.n_zones:2 + 2 * self.n_zones]
 
         # supply air: [-1,1] -> [285.15, 305.15] K [12°C, 32°C]
         supply_air_sp = 295.15 + supply_air_action * 10.0
@@ -304,22 +342,20 @@ class BuildingGymEnv(gym.Env):
         )
         self.boiler.set_action("supply_water_setpoint", float(boiler_sp), action_timestamp)
 
-        # shared damper — same for all zones
         min_damper = 0.00001
-        damper_cmd = float(np.clip((shared_damper + 1.0) * 0.5, min_damper, 1.0))
-
         reheat_cmds = np.clip((vav_reheat_actions + 1.0) * 0.5, 0.0, 1.0)
-        self._last_shared_damper_cmd = np.float32(damper_cmd)
+        damper_cmds = np.clip((vav_damper_actions + 1.0) * 0.5, min_damper, 1.0)
         self._last_reheat_cmds = reheat_cmds.astype(np.float32)
+        self._last_damper_cmds = damper_cmds.astype(np.float32)
 
         for i, zone_id in enumerate(self.zone_ids):
             vav = self.vavs[zone_id]
             vav.set_action(
                 "supply_air_damper_percentage_command",
-                damper_cmd,   # shared for all zones
+                float(damper_cmds[i]),
                 action_timestamp,
             )
-            vav.reheat_valve_setting = float(reheat_cmds[i])  # per zone
+            vav.reheat_valve_setting = float(reheat_cmds[i])
 
         self.sim.step_sim()
         obs = self._get_obs()
@@ -467,15 +503,15 @@ class BuildingGymEnv(gym.Env):
         # energy_rate (watts mode): total W normalized by physics-based peak estimate
         # total_cost (cost mode): USD/step normalized by cost_norm
         # smoothness_penalty: penalizes large action changes to discourage bang-bang control
+        # energy_weight controls the comfort/energy trade-off:
+        #   2.0 → peak energy penalty = 2× a 1°C violation  (energy-focused)
+        #   1.0 → peak energy penalty = 1× a 1°C violation  (balanced)
+        #   0.5 → peak energy penalty = 0.5× a 1°C violation (comfort-focused)
+        energy_weight = self.energy_weight
         if self.use_cost_reward:
-            # Cost mode: peak energy penalty ≈ 2.0 (2× a 1°C violation).
-            # Agent strongly prefers saving energy while comfort violations dominate quadratically.
-            energy_weight = 2.0 if self.occupancy_model != "step" else 0.0
-            energy_penalty = energy_weight * total_cost / max(self._cost_norm, 1e-9)
+            energy_penalty = energy_weight * total_cost / max(self._cost_norm, 1e-9) if self.occupancy_model != "step" else 0.0
         else:
-            # Watts mode: normalize by physics peak estimate
-            energy_weight = 2.0 if self.occupancy_model != "step" else 0.0
-            energy_penalty = energy_weight * energy_rate / max(self._energy_norm, 1.0)
+            energy_penalty = energy_weight * energy_rate / max(self._energy_norm, 1.0) if self.occupancy_model != "step" else 0.0
 
         # Small penalty on action rate-of-change (max delta per dim = 2.0)
         # Weight 0.05 → max smoothness penalty ≈ 0.1, much smaller than comfort

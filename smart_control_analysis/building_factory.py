@@ -16,7 +16,7 @@ from smart_control.simulator.building import MaterialProperties
 from smart_control.simulator.hvac_floorplan_based import FloorPlanBasedHvac
 from smart_control.simulator.setpoint_schedule import SetpointSchedule
 from smart_control_analysis.custom_sbsim.fast_cpu_simulator import FastCPUSimulator
-from smart_control_analysis.floorplans import single_room, office_4room, corporate_floor
+from smart_control_analysis.floorplans import single_room, office_4room, corporate_floor, headquarters_floor
 
 
 
@@ -53,6 +53,8 @@ def building_factory(
         floor_plan, zone_map = office_4room()
     elif floorplan_name == "corporate_floor":
         floor_plan, zone_map = corporate_floor()
+    elif floorplan_name == "headquarters_floor":
+        floor_plan, zone_map = headquarters_floor()
     else:
         floor_plan, zone_map = single_room(room_width=10, room_height=10)
 
@@ -180,6 +182,8 @@ def building_factory(
         comfort_band_k=params.get("comfort_band_k", (294.15, 295.15)),
         working_hours=params.get("working_hours", (8.0, 18.0)),
         night_setback_k=params.get("night_setback_k", 2.0),
+        energy_weight=params.get("energy_weight", 2.0),
+        action_design=params.get("action_design", "reheat_per_zone"),
         max_steps=params.get("max_steps", None),
         occupancy_per_zone=params.get("occupancy_per_zone", 10.0),
         energy_norm=_energy_norm,
@@ -195,7 +199,7 @@ def get_base_params() -> dict:
         "time_step_sec": 60,
         "max_steps": int(7 * 24 * 3600 / 60),
         "working_hours":  (8.0, 18.0),
-        "floorplan": "office_4room",  # "single_room" for original 1-zone layout
+        "floorplan": "headquarters_floor",  # "single_room" for original 1-zone layout
 
 
         # Weather

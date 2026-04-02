@@ -23,6 +23,6 @@ mkdir -p /user/gent/453/vsc45342/thesis/results
 mkdir -p /user/gent/453/vsc45342/thesis/logs
 
 cd ~/thesis/sbsim-analysis/
-~/.conda/envs/sbsim/bin/python scripts/train_rl.py --mode mini --algo sac --seed 42 --unique_run --weather_csv /user/gent/453/vsc45342/thesis/weather_data/oslo_weather_multiyear.csv
+~/.conda/envs/sbsim/bin/python scripts/train_rl.py --mode mini --algo sac --seed 42 --unique_run --floorplan office_4room --weather_csv /user/gent/453/vsc45342/thesis/weather_data/oslo_weather_multiyear.csv
 
 echo "Job completed successfully"
