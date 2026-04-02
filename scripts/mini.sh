@@ -16,6 +16,10 @@ ml load FFmpeg/6.0-GCCcore-12.3.0
 ml load glew/2.2.0-GCCcore-12.3.0-osmesa
 ml load protobuf-python/4.24.0-GCCcore-12.3.0
 
+export OMP_NUM_THREADS=4
+export MKL_NUM_THREADS=4
+export OPENBLAS_NUM_THREADS=4
+
 eval "$(conda shell.bash hook)"
 conda activate sbsim
 

@@ -115,8 +115,9 @@ def _make_env_worker(
     """
     def _init():
         if gpu_id is not None:
-            import os
             os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+        else:
+            os.environ["CUDA_VISIBLE_DEVICES"] = ""  # disable GPU, avoid TF CUDA init hang
         kwargs = factory_kwargs.copy()
         if training_mode is not None:
             kwargs["training_mode"] = training_mode
@@ -193,7 +194,7 @@ class BuildingRLTrainer:
                 params=params.copy(),
                 factory_kwargs=kwargs,
                 training_mode=training_mode,
-                gpu_id = i % 2,
+                gpu_id=None,
                 rank=i,
             )
             for i in range(n_envs)

@@ -23,9 +23,7 @@ smart-control = { path = "../sbsim", develop = true }
 # torchvision = { version = "0.25.0+cu128", source = "pytorch-cu128" }
 # torchaudio = { version = "2.10.0+cu128", source = "pytorch-cu128" }
 
-tensorflow = "2.15.1"
-gymnasium = "^0.29.1"
-# stable-baselines3 = {version = "^2.7.1", extras = ["extra"]}
+#gymnasium = "^0.29.1"
 
 # The "dm-reverb" package is meant for Linux only, so we are conditionally
 # ... installing the normal package on Linux, and another package on Mac.
@@ -33,14 +31,13 @@ gymnasium = "^0.29.1"
 # ... See: https://github.com/google/sbsim/issues/102 for details.
 #dm-reverb = "^0.14.0"
 #
-dm-reverb = { version = "0.14.0", markers = "sys_platform == 'linux'" }
-dm-reverb-macos = { version = "0.11.0.dev0", markers = "sys_platform == 'darwin'" }
+#dm-reverb = { version = "0.14.0", markers = "sys_platform == 'linux'" }
+#dm-reverb-macos = { version = "0.11.0.dev0", markers = "sys_platform == 'darwin'" }
 #dm-reverb-macos-nightly = { version = ">=0.11.20241207", markers = "sys_platform == 'darwin'" }
 
 meteostat = "1.6.8"
 pytz = "^2024.1"
 gin-config = "^0.5.0"
-matplotlib = "^3.9.2"
 pandas = "^2.2.2"
 bidict = "^0.23.1"
 protobuf = "3.20.3"
@@ -51,15 +48,21 @@ opencv-python = "^4.10.0.84"
 scipy = "^1.14.1"
 mediapy = "^1.2.2"
 seaborn = "^0.13.2"
-tf-agents = "0.18.0"
+#tf-agents = "0.18.0"
 scikit-learn = "^1.5.1"
 ipykernel = "^6.29.5"
-typing-extensions = "^4.12.2"
 ipython = "^8.27.0"
 importlib-resources = { version = "*", python = "<3.11" }
 python-dotenv = "^1.1.0"
 wandb = "^0.19.11"
 numba = "^0.60.0"
+numpy = ">=1.24"
+
+matplotlib = "3.10.8"
+filelock = "3.25.2"
+pyparsing = "3.3.2"
+setuptools = "82.0.1"
+typing-extensions = "4.15.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3.5"
