@@ -8,10 +8,6 @@ packages = [
   { include = "smart_control_analysis" }
 ]
 
-[[tool.poetry.source]]
-name = "pytorch-cu128"
-url = "https://download.pytorch.org/whl/cu128"
-priority = "explicit"
 
 [tool.poetry.dependencies]
 python = ">=3.10.12,<3.12"
@@ -35,6 +31,7 @@ smart-control = { path = "../sbsim", develop = true }
 #dm-reverb-macos = { version = "0.11.0.dev0", markers = "sys_platform == 'darwin'" }
 #dm-reverb-macos-nightly = { version = ">=0.11.20241207", markers = "sys_platform == 'darwin'" }
 
+# stable-baselines3 = {version = "2.3.2", extras = []}
 meteostat = "1.6.8"
 pytz = "^2024.1"
 gin-config = "^0.5.0"
@@ -44,7 +41,7 @@ protobuf = "3.20.3"
 pint = "^0.24.3"
 holidays = "^0.56"
 google3 = "^1.0.0"
-opencv-python = "^4.10.0.84"
+#opencv-python = "^4.10.0.84"
 scipy = "^1.14.1"
 mediapy = "^1.2.2"
 seaborn = "^0.13.2"

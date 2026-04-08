@@ -1,0 +1,75 @@
+"""
+Parse EEX ZTP Gas Spot Excel and save a monthly gas price parquet.
+
+Output: thesis/weather_data/ztp_gas_prices.parquet
+  - Index: pd.Period('YYYY-MM', freq='M')  stored as year, month int columns
+  - Column 'usd_per_1000ft3': converted price used by NaturalGasEnergyCost
+
+Conversion: EUR/MWh → USD/1000 ft³
+  1 MWh natural gas ≈ 35.315 thousand cubic feet (standard conditions)
+  1 EUR ≈ 1.08 USD
+  usd_per_1000ft3 = eur_per_mwh * 1.08 / 35.315
+"""
+
+import pandas as pd
+import numpy as np
+
+EXCEL_PATH = "/user/gent/453/vsc45342/thesis/weather_data/eex-ztp-gas-spot--c--elexys.xlsx"
+OUT_PATH   = "/user/gent/453/vsc45342/thesis/weather_data/ztp_gas_prices.parquet"
+
+EUR_TO_USD = 1.08
+MWH_TO_1000FT3 = 35.315  # 1 MWh gas ≈ 35.315 thousand cubic feet
+
+MONTH_MAP = {
+    "Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4, "May": 5, "Jun": 6,
+    "Jul": 7, "Aug": 8, "Sep": 9, "Oct": 10, "Nov": 11, "Dec": 12,
+}
+
+
+def parse_eur(val) -> float:
+    """Parse '€ 11,19' or similar to float."""
+    if pd.isna(val):
+        return float("nan")
+    s = str(val).replace("€", "").replace(" ", "").replace(",", ".")
+    try:
+        return float(s)
+    except ValueError:
+        return float("nan")
+
+
+def main():
+    df = pd.read_excel(EXCEL_PATH, header=None, skiprows=2)
+    # Row 0 after skiprows=2 is the header: Month, 2020, 2021, ...
+    df.columns = df.iloc[0]
+    df = df.iloc[1:].reset_index(drop=True)
+    df = df[df["Month"].isin(MONTH_MAP)].copy()
+
+    years = [c for c in df.columns if str(c).isdigit()]
+
+    records = []
+    for _, row in df.iterrows():
+        month = MONTH_MAP[row["Month"]]
+        for year in years:
+            eur = parse_eur(row[year])
+            if not np.isnan(eur):
+                usd = eur * EUR_TO_USD / MWH_TO_1000FT3
+                records.append({"year": int(year), "month": month,
+                                 "eur_per_mwh": eur, "usd_per_1000ft3": usd})
+
+    out = pd.DataFrame(records).set_index(["year", "month"]).sort_index()
+    print(out.to_string())
+
+    # 2019 is missing — use 2020 values as fallback
+    for month in range(1, 13):
+        if (2020, month) in out.index and (2019, month) not in out.index:
+            row = out.loc[(2020, month)].copy()
+            out.loc[(2019, month), :] = row
+    out = out.sort_index()
+
+    out.to_parquet(OUT_PATH)
+    print(f"\nSaved → {OUT_PATH}")
+    print(f"Years covered: {sorted(out.index.get_level_values('year').unique())}")
+
+
+if __name__ == "__main__":
+    main()

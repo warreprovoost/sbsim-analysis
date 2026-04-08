@@ -12,14 +12,8 @@ set -e
 ml purge
 ml GCCcore/12.3.0
 ml Python-bundle-PyPI/2023.06-GCCcore-12.3.0
-ml TensorFlow/2.15.1-foss-2023a
 ml load PyTorch-bundle/2.1.2-foss-2023a
-ml load Stable-Baselines3/2.3.2-foss-2023a
-ml Gymnasium/0.29.1-foss-2023a
 
-ml load FFmpeg/6.0-GCCcore-12.3.0
-ml load glew/2.2.0-GCCcore-12.3.0-osmesa
-ml load protobuf-python/4.24.0-GCCcore-12.3.0
 
 # Cap PyTorch/OpenMP threads — default inherits all 96 node cores which causes
 # massive thread spawn overhead on small SAC networks. 4 threads is optimal.
@@ -38,11 +32,11 @@ SEED=${SEED:-42}
 WEIGHT=${WEIGHT:-2.0}
 ACTION_DESIGN=${ACTION_DESIGN:-reheat_per_zone}
 ~/.conda/envs/sbsim/bin/python scripts/train_rl.py \
-    --mode full --algo sac --seed ${SEED} \
+    --mode long_cpu --algo sac --seed ${SEED} \
     --floorplan office_4room \
     --energy_weight ${WEIGHT} \
     --action_design ${ACTION_DESIGN} \
     --unique_run \
-    --weather_csv /user/gent/453/vsc45342/thesis/weather_data/oslo_weather_multiyear.csv
+    --weather_csv /user/gent/453/vsc45342/thesis/weather_data/belgium_weather_multiyear.csv
 
 echo "Job completed successfully"

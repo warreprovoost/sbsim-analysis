@@ -1,5 +1,6 @@
 import csv
 import os
+import torch
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -282,7 +283,7 @@ class BuildingRLTrainer:
         common_params = {
             "learning_rate": learning_rate,
             "verbose": verbose,
-            "device": "auto",
+            "device": "cuda" if torch.cuda.is_available() else "cpu",
         }
 
         # Algo-specific parameters
@@ -814,12 +815,12 @@ def run_rl_setup(
     energy_weight: float = 2.0,
     action_design: str = "reheat_per_zone",
     wandb_finish: bool = True,
-    train_period_start: str = "2019-11-01",
-    train_period_end: str = "2023-11-01",
-    val_period_start: str = "2023-11-01",
-    val_period_end: str = "2023-11-23",  # keep 7 days clear of val/test boundary
-    test_period_start: str = "2023-11-30",
-    test_period_end: str = "2023-12-24",  # keep 7 days clear of CSV end (2023-12-31)
+    train_period_start="2019-10-01",
+    train_period_end="2022-03-31",
+    val_period_start="2022-10-01",
+    val_period_end="2023-03-24",
+    test_period_start="2023-10-01",
+    test_period_end="2024-03-24",
     **train_kwargs,
 ) -> Dict[str, Any]:
     os.makedirs(output_dir, exist_ok=True)
@@ -1054,6 +1055,8 @@ def _run_episode_trace(
             "energy_cost_usd": float(info.get("energy_cost_usd", 0.0)),
             "gas_cost_usd": float(info.get("gas_cost_usd", 0.0)),
             "elec_cost_usd": float(info.get("elec_cost_usd", 0.0)),
+            "elec_price_eur_per_mwh": float(info.get("elec_price_eur_per_mwh", np.nan)),
+            "gas_price_eur_per_mwh": float(info.get("gas_price_eur_per_mwh", np.nan)),
             "reward": float(reward),
             "reward_total": float(info.get("reward_total", reward)),
             "supply_air_sp_C": float(info.get("supply_air_sp_C", np.nan)),
@@ -1129,6 +1132,37 @@ def _plot_comparison_boxplots(
     return fig
 
 
+def _plot_energy_prices(
+    df: pd.DataFrame,
+    title: str = "Energy Prices",
+    fig_path: Optional[str] = None,
+) -> plt.Figure:
+    """Plot electricity and gas spot prices over an episode."""
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 5), sharex=True)
+    fig.suptitle(title, fontsize=13)
+
+    if "elec_price_eur_per_mwh" in df.columns:
+        ax1.plot(df["timestamp"], df["elec_price_eur_per_mwh"], color="tab:blue", linewidth=1.0)
+        ax1.set_ylabel("Electricity\n(EUR/MWh)")
+        ax1.grid(True, alpha=0.3)
+
+    if "gas_price_eur_per_mwh" in df.columns:
+        ax2.plot(df["timestamp"], df["gas_price_eur_per_mwh"], color="tab:orange", linewidth=1.0)
+        ax2.set_ylabel("Gas ZTP\n(EUR/MWh)")
+        ax2.grid(True, alpha=0.3)
+
+    ax2.set_xlabel("Time")
+    fig.autofmt_xdate()
+    plt.tight_layout()
+
+    if fig_path is not None:
+        plt.savefig(fig_path, dpi=150, bbox_inches="tight")
+        print(f"Saved energy prices plot: {fig_path}")
+
+    plt.close(fig)
+    return fig
+
+
 def _compare_period_rl_vs_baseline(
     trainer: BuildingRLTrainer,
     params_template: Dict[str, Any],
@@ -1143,6 +1177,7 @@ def _compare_period_rl_vs_baseline(
     training_mode: str,
     n_plot_episodes: int,
     verbose: bool = True,
+    save_traces: bool = False,
 ) -> Tuple[pd.DataFrame, Dict[str, float]]:
     rng = np.random.default_rng(seed)
     rows = []
@@ -1204,9 +1239,9 @@ def _compare_period_rl_vs_baseline(
         )
         env_b.close()
 
-        # save traces
-        rl_df.to_csv(os.path.join(period_dir, f"episode_{ep:02d}_rl_trace.csv"), index=False)
-        b_df.to_csv(os.path.join(period_dir, f"episode_{ep:02d}_baseline_trace.csv"), index=False)
+        if save_traces:
+            rl_df.to_csv(os.path.join(period_dir, f"episode_{ep:02d}_rl_trace.csv"), index=False)
+            b_df.to_csv(os.path.join(period_dir, f"episode_{ep:02d}_baseline_trace.csv"), index=False)
 
         if ep < n_plot_episodes:
             _plot_episode_trace_6panel(
@@ -1219,6 +1254,26 @@ def _compare_period_rl_vs_baseline(
                 title=f"{period_name.upper()} Episode {ep} - Baseline",
                 fig_path=os.path.join(period_dir, f"episode_{ep:02d}_baseline_plot.png"),
             )
+            _plot_energy_prices(
+                rl_df,
+                title=f"{period_name.upper()} Episode {ep} - Energy Prices",
+                fig_path=os.path.join(period_dir, f"episode_{ep:02d}_prices_plot.png"),
+            )
+
+        def _comfort_stats(trace_df):
+            """Returns (pct_outside, max_deviation_c) for an episode trace."""
+            if trace_df.empty:
+                return 0.0, 0.0
+            t = trace_df["room_temp_c"].to_numpy()
+            low = trace_df["comfort_low_c"].to_numpy() if "comfort_low_c" in trace_df.columns else np.full(len(t), np.nan)
+            high = trace_df["comfort_high_c"].to_numpy() if "comfort_high_c" in trace_df.columns else np.full(len(t), np.nan)
+            violation = np.maximum(low - t, 0.0) + np.maximum(t - high, 0.0)
+            pct_outside = float((violation > 0).mean() * 100.0)
+            max_dev = float(violation.max())
+            return pct_outside, max_dev
+
+        rl_pct_outside, rl_max_dev = _comfort_stats(rl_df)
+        b_pct_outside, b_max_dev = _comfort_stats(b_df)
 
         row = {
             "episode": ep,
@@ -1234,6 +1289,10 @@ def _compare_period_rl_vs_baseline(
             "baseline_energy_cost_usd": b_m["energy_cost_usd"],
             "rl_discomfort_deg_h": rl_m["discomfort_deg_h"],
             "baseline_discomfort_deg_h": b_m["discomfort_deg_h"],
+            "rl_pct_outside_comfort": rl_pct_outside,
+            "baseline_pct_outside_comfort": b_pct_outside,
+            "rl_max_temp_deviation_c": rl_max_dev,
+            "baseline_max_temp_deviation_c": b_max_dev,
             "episode_length": rl_m["length"],
         }
         rows.append(row)
@@ -1293,10 +1352,11 @@ def compare_rl_vs_baseline(
     training_mode: str = "full",
     n_plot_episodes: int = 2,
     verbose: bool = True,
-    val_period_start: str = "2023-11-01",
-    val_period_end: str = "2023-11-23",  # keep 7 days clear of val/test boundary
-    test_period_start: str = "2023-11-30",
-    test_period_end: str = "2023-12-24",  # keep 7 days clear of CSV end (2023-12-31)
+    save_traces: bool = False,
+    val_period_start="2022-10-01",
+    val_period_end="2023-03-24",
+    test_period_start="2023-10-01",
+    test_period_end="2024-03-24",
 ) -> Dict[str, Any]:
     """
     Compare trained RL policy vs thermostat baseline on winter val/test splits.
@@ -1322,6 +1382,7 @@ def compare_rl_vs_baseline(
         training_mode=training_mode,
         n_plot_episodes=n_plot_episodes,
         verbose=verbose,
+        save_traces=save_traces,
     )
     test_df, test_summary = _compare_period_rl_vs_baseline(
         trainer=trainer,
@@ -1337,6 +1398,7 @@ def compare_rl_vs_baseline(
         training_mode=training_mode,
         n_plot_episodes=n_plot_episodes,
         verbose=verbose,
+        save_traces=save_traces,
     )
 
     # Training curve plot

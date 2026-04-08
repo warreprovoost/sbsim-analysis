@@ -8,9 +8,7 @@ import re
 
 from smart_control.simulator.randomized_arrival_departure_occupancy import RandomizedArrivalDepartureOccupancy
 from smart_control.simulator.step_function_occupancy import StepFunctionOccupancy
-from smart_control.reward.natural_gas_energy_cost import NaturalGasEnergyCost
-from smart_control.reward.electricity_energy_cost import ElectricityEnergyCost
-from smart_control_analysis.energy_prices import GAS_PRICE_BY_MONTH_SOURCE, WEEKDAY_PRICE_BY_HOUR, WEEKEND_PRICE_BY_HOUR
+from smart_control_analysis.energy_prices import get_electricity_price_usd_per_ws, get_gas_price_usd_per_1000ft3
 
 
 class _AlwaysZeroOccupancy:
@@ -105,21 +103,10 @@ class BuildingGymEnv(gym.Env):
             raise ValueError(f"Unknown action_design: {action_design!r}")
         self.action_design = action_design
 
-        # Pre-extract scalar prices ($/J for gas, $/Ws for elec) to avoid pint overhead per step.
-        # NaturalGasEnergyCost stores _month_gas_price as plain np.array ($/J).
-        _gas_obj = NaturalGasEnergyCost(gas_price_by_month=GAS_PRICE_BY_MONTH_SOURCE)
-        self._gas_price_per_j: np.ndarray = _gas_obj._month_gas_price  # shape (12,), $/J
-
-        # ElectricityEnergyCost stores prices as pint quantities → extract .magnitude ($/Ws).
-        # Suppress UnitStrippedWarning fired during construction (pint internals, not our code).
-        import warnings
-        with warnings.catch_warnings():
-            warnings.filterwarnings("ignore", message="The unit of the quantity is stripped")
-            _elec_obj = ElectricityEnergyCost(weekday_energy_prices=WEEKDAY_PRICE_BY_HOUR, weekend_energy_prices=WEEKEND_PRICE_BY_HOUR)
-        self._elec_weekday: np.ndarray = np.array([v.magnitude if hasattr(v, 'magnitude') else float(v)
-                                                   for v in _elec_obj._weekday_energy_prices])  # (24,) $/Ws
-        self._elec_weekend: np.ndarray = np.array([v.magnitude if hasattr(v, 'magnitude') else float(v)
-                                                   for v in _elec_obj._weekend_energy_prices])  # (24,) $/Ws
+        # Energy prices: real Belgian ZTP gas and Belpex electricity, looked up per timestamp.
+        # Page 6 of European Commission, Joint Research Centre. (2017).
+        # Best Available Techniques (BAT) Reference Document for Large Combustion Plants. Publications Office of the EU.
+        self._BOILER_EFFICIENCY: float = 0.88
 
         # Cost norm: peak cost per step at 60s timestep.
         # Peak boiler (113W gas, Jan) + blower (30W elec peak) for 60s ≈ $0.000161
@@ -152,7 +139,7 @@ class BuildingGymEnv(gym.Env):
         #      + [supply_air_sp, boiler_sp, ambient, ambient_trend](4) + forecast(3)
         self.observation_space = spaces.Box(
             low=-1e3, high=1e4,
-            shape=(self.n_zones * 4 + 12,),
+            shape=(self.n_zones * 4 + 14,),
             dtype=np.float32,
         )
         # convenience references
@@ -254,6 +241,14 @@ class BuildingGymEnv(gym.Env):
         # temps_c: absolute zone temp, centre on comfort midpoint, same ±8°C normalisation
         temps_norm = np.clip((temps_c - (comfort_mid_c)) / 8.0, -1.0, 1.0).astype(np.float32)
 
+        # Energy prices — normalised to [-1, 1]
+        # Belpex electricity: centre=150 EUR/MWh, half-range=150 (covers 0–300 EUR/MWh)
+        _elec_eur_per_mwh = get_electricity_price_usd_per_ws(local_ts) * 3.6e9 / 1.08
+        elec_price_norm = np.float32(np.clip(_elec_eur_per_mwh / 150.0 - 1.0, -1.0, 1.0))
+        # ZTP gas: centre=50 EUR/MWh, half-range=50 (covers 0–100 EUR/MWh)
+        _gas_eur_per_mwh = get_gas_price_usd_per_1000ft3(local_ts) / 1.08 * 293.07107 / 1000.0
+        gas_price_norm = np.float32(np.clip(_gas_eur_per_mwh / 50.0 - 1.0, -1.0, 1.0))
+
         return np.concatenate([
             temps_norm,                                    # n  zone temp normalised to [-1,1]
             temp_errors_norm,                              # n  comfort error normalised to [-1,1]
@@ -270,6 +265,7 @@ class BuildingGymEnv(gym.Env):
                 dtype=np.float32,
             ),                                             # 4
             forecast_norm,                                 # 3  forecast temps normalised to [-1,1]
+            np.array([elec_price_norm, gas_price_norm], dtype=np.float32),  # 2  energy prices
         ])
 
     def reset(self, *, seed: Optional[int] = None, options: Optional[Dict] = None) -> Tuple[np.ndarray, Dict]:
@@ -371,9 +367,10 @@ class BuildingGymEnv(gym.Env):
         dt = float(self.sim.time_step_sec)
         local_start = action_timestamp.tz_convert(self.time_zone)
         gas_rate = max(0.0, self._last_energy_components["boiler_gas_rate"])
-        gas_cost = float(self._gas_price_per_j[local_start.month - 1] * gas_rate * dt)
+        _gas_usd_per_j = get_gas_price_usd_per_1000ft3(local_start) / 293.07107 / 3.6e6
+        gas_cost = float(_gas_usd_per_j * gas_rate / self._BOILER_EFFICIENCY * dt)
         elec_rate = abs(self._last_energy_components["blower_rate"]) + abs(self._last_energy_components["ah_conditioning_rate"])
-        elec_price = self._elec_weekend[local_start.hour] if local_start.dayofweek >= 5 else self._elec_weekday[local_start.hour]
+        elec_price = get_electricity_price_usd_per_ws(local_start)
         elec_cost = float(elec_price * elec_rate * dt)
         total_cost = gas_cost + elec_cost
 
@@ -392,6 +389,8 @@ class BuildingGymEnv(gym.Env):
             "energy_cost_usd":      float(total_cost),
             "gas_cost_usd":         float(gas_cost),
             "elec_cost_usd":        float(elec_cost),
+            "elec_price_eur_per_mwh": float(elec_price * 3.6e9 / 1.08),  # USD/Ws → EUR/MWh
+            "gas_price_eur_per_mwh":  float(get_gas_price_usd_per_1000ft3(local_start) / 1.08 * 293.07107 / 1000.0),  # USD/1000ft3 → EUR/MWh
             "blower_rate":          self._last_energy_components["blower_rate"],
             "ah_conditioning_rate": self._last_energy_components["ah_conditioning_rate"],
             "boiler_gas_rate":      self._last_energy_components["boiler_gas_rate"],

@@ -196,7 +196,7 @@ def get_base_params() -> dict:
     """Return default parameter configuration."""
     return {
         # Sim
-        "time_step_sec": 60,
+        "time_step_sec": 60 * 10,
         "max_steps": int(7 * 24 * 3600 / 60),
         "working_hours":  (8.0, 18.0),
         "floorplan": "headquarters_floor",  # "single_room" for original 1-zone layout
@@ -254,5 +254,3 @@ def get_base_params() -> dict:
         "use_cost_reward": True,
         "night_setback_k": 4.0,  # lower comfort band by 2K outside working hours (18-20°C at night)
     }
-
-from smart_control_analysis.energy_prices import GAS_PRICE_BY_MONTH_SOURCE, WEEKDAY_PRICE_BY_HOUR, WEEKEND_PRICE_BY_HOUR  # noqa: F401

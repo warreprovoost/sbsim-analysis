@@ -8,6 +8,7 @@ Usage:
     python train_rl.py --mode mini --unique_run  # add timestamp to avoid overwrites
 """
 
+import torch; torch.cuda.is_available()  # must be imported first before other imports hijack CUDA detection
 import argparse
 import os
 import sys
@@ -26,8 +27,8 @@ from smart_control_analysis.rl_trainer import run_rl_setup, compare_rl_vs_baseli
 # ─────────────────────────────────────────────
 PRESETS = {
     "mini": dict(
-        total_timesteps=6000,
-        chunk_timesteps=3000,
+        total_timesteps=3000,
+        chunk_timesteps=1500,
         episode_days=7,
         n_eval_episodes=1,
         training_mode="full",
@@ -44,13 +45,13 @@ PRESETS = {
         description="Quick smoke test — 5k steps, full, 3-day episodes",
     ),
     "long": dict(
-        total_timesteps=100_000,
-        chunk_timesteps=5_000,
+        total_timesteps=1_000_000,
+        chunk_timesteps=50_000,   # ~5 full episodes per chunk (1 episode = 10,080 steps at 60s/7days)
         episode_days=7,
-        n_eval_episodes=5,
+        n_eval_episodes=10,
         training_mode="full",
         eval_training_mode="full",
-        description="Full comfort training — 100k steps, 7-day episodes",
+        description="Full training with energy penalty — 1M steps, 7-day episodes, 60s timestep",
     ),
     "long_eval1": dict(
         total_timesteps=100_000,
@@ -79,6 +80,35 @@ PRESETS = {
         eval_training_mode="full",
         description="Full training with energy penalty — 100k steps, 7-day episodes, 1 eval episode",
     ),
+    # CPU-optimized: train_freq=10 batches gradient updates to reduce Python overhead.
+    # batch_size=1024 uses CPU BLAS more efficiently.
+    # net_arch=[64,64] matches the small obs space (28 dims) and cuts linear op time ~16x vs [256,256].
+    "long_cpu": dict(
+        total_timesteps=1_000_000,
+        chunk_timesteps=50_000,
+        episode_days=7,
+        n_eval_episodes=10,
+        training_mode="full",
+        eval_training_mode="full",
+        train_freq=10,
+        gradient_steps=10,
+        batch_size=1024,
+        policy_kwargs={"net_arch": [64, 64]},
+        description="1M steps CPU-optimised",
+    ),
+    "mega_cpu": dict(
+        total_timesteps=10_000_000,
+        chunk_timesteps=500_000,
+        episode_days=7,
+        n_eval_episodes=3,
+        training_mode="full",
+        eval_training_mode="full",
+        train_freq=10,
+        gradient_steps=10,
+        batch_size=1024,
+        policy_kwargs={"net_arch": [64, 64]},
+        description="10M steps CPU-optimised",
+    ),
     "always_occ1": dict(
         total_timesteps=100_000,
         chunk_timesteps=5_000,
@@ -97,7 +127,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Train SAC/TD3 on building HVAC.")
     parser.add_argument(
         "--mode",
-        choices=["mini", "short", "long", "long_eval1", "full", "full_eval1", "always_occ1"],
+        choices=["mini", "short", "long", "long_eval1", "full", "full_eval1", "always_occ1", "long_cpu", "mega_cpu"],
         default="short",
         help="Training preset to use.",
     )
@@ -244,6 +274,11 @@ def main():
 
     # ── Training ──
     print("\n--- TRAINING ---")
+    # Extract known run_rl_setup params from preset; remaining keys are algo kwargs
+    _known = {"total_timesteps", "chunk_timesteps", "episode_days", "n_eval_episodes",
+              "training_mode", "eval_training_mode", "description"}
+    _extra_train_kwargs = {k: v for k, v in preset.items() if k not in _known}
+
     res = run_rl_setup(
         weather_csv_path=weather_csv,
         algo=args.algo,
@@ -261,6 +296,7 @@ def main():
         action_design=args.action_design,
         wandb_run=wandb_run,
         wandb_finish=False,  # keep run alive for compare logging
+        **_extra_train_kwargs,
     )
 
     print("\nTRAIN SUMMARY:")
