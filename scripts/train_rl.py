@@ -46,7 +46,7 @@ PRESETS = {
     ),
     "long": dict(
         total_timesteps=1_000_000,
-        chunk_timesteps=50_000,   # ~5 full episodes per chunk (1 episode = 10,080 steps at 60s/7days)
+        chunk_timesteps=50_000,   # ~50 full episodes per chunk (1 episode = 1,008 steps at 600s/7days)
         episode_days=7,
         n_eval_episodes=30,
         training_mode="full",
@@ -64,7 +64,7 @@ PRESETS = {
     ),
     "full": dict(
         total_timesteps=1_000_000,
-        chunk_timesteps=50_000,   # ~5 full episodes per chunk (1 episode = 10,080 steps at 60s/7days)
+        chunk_timesteps=50_000,   # ~50 full episodes per chunk (1 episode = 1,008 steps at 600s/7days)
         episode_days=7,
         n_eval_episodes=10,
         training_mode="full",
@@ -320,7 +320,7 @@ def main():
                 trainer=res["trainer"],
                 params_template=res["trainer"].base_params.copy(),
                 period_name="test",
-                period_start="2023-10-01",
+                period_start="2023-12-01",
                 period_end="2024-03-24",
                 output_dir=compare_dir,
                 n_episodes=preset["n_eval_episodes"],

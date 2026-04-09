@@ -24,7 +24,7 @@ def main():
     parser = argparse.ArgumentParser(description="Re-evaluate a trained RL model")
     parser.add_argument("result_dir", help="Path to the result directory (contains run_config.json)")
     parser.add_argument("--output_dir", default=None, help="Output dir for comparison (default: <result_dir>/compare_reeval)")
-    parser.add_argument("--n_episodes", type=int, default=10)
+    parser.add_argument("--n_episodes", type=int, default=30)
     parser.add_argument("--n_plot_episodes", type=int, default=1)
     parser.add_argument("--episode_days", type=int, default=None, help="Override episode length (default: from run_config)")
     parser.add_argument("--seed", type=int, default=141)
@@ -33,7 +33,7 @@ def main():
     parser.add_argument("--no_val", action="store_true", help="Skip validation period, only run test")
     parser.add_argument("--val_start", default="2022-10-01")
     parser.add_argument("--val_end", default="2023-03-24")
-    parser.add_argument("--test_start", default="2023-10-01")
+    parser.add_argument("--test_start", default="2023-12-01")
     parser.add_argument("--test_end", default="2024-03-24")
     args = parser.parse_args()
 

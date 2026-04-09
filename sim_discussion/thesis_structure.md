@@ -1,18 +1,22 @@
 # Thesis Structure
 
-**Working Title:** Comparing Reinforcement Learning Algorithms for HVAC Control Using the Google Smart Buildings Simulator
+**Working Title:** Reinforcement Learning for Home Energy Management:
+Optimization and Evaluation in the (HomeLab)
 
 ---
 
 ## 1. Introduction
 
 - Context: energy consumption in buildings, HVAC as dominant contributor
-- Problem: traditional rule-based HVAC controllers are rigid; optimal control is hard due to complex thermodynamics, variable occupancy, and fluctuating energy prices
+- Problem: traditional rule-based HVAC controllers are rigid; optimal control is hard due to complex thermodynamics, and fluctuating energy prices
 - Opportunity: reinforcement learning as a data-driven approach to adaptive building control
-- Research question: how do different continuous-control RL algorithms (SAC, TD3) compare for HVAC optimization, and can they outperform a well-tuned rule-based baseline?
+- Research questions:
+  - **RQ1:** How do off-policy deep RL algorithms (SAC and TD3) compare in optimizing the trade-off between energy cost and occupant thermal comfort in a simulated office building, and can they outperform a rule-based thermostat baseline?
+  - **RQ2:** How does the inclusion of real-time Belgian electricity and gas spot prices in the observation and reward signal affect the learned control policy, and does the agent exhibit price-aware demand-response behaviour?
 - Contribution overview and thesis outline
 
-> **[DRAFT NOTE]** DDPG may be added as a third algorithm if time permits. It serves as a historical baseline that TD3 directly improves upon, giving a nice "algorithmic evolution" narrative. Confirm with supervisors whether this is worth the extra training cost.
+> **[DRAFT NOTE]** Should we add DDPG as third algorithm (time issue) historical baseline that TD3 directly improves upon
+
 
 ## 2. Background & Literature Review
 
@@ -20,18 +24,19 @@
 - Building energy consumption and its environmental impact
 - HVAC system components: air handling units, boilers, VAV boxes, reheat coils, dampers
 - Two heating paths: air-side (supply air temperature + damper) vs water-side (boiler + reheat coil)
-- Comfort standards and thermal comfort metrics (comfort bands, degree-hours)
+- Comfort standards and thermal comfort metrics (comfort bands, degree-hours, percentage outside band, wordt case violation)
 
 ### 2.2 Classical HVAC Control
-- Rule-based control (thermostat hysteresis, PID)
-- Model predictive control (MPC) and its limitations
+- Rule-based control (thermostat hysteresis)
 - Limitations of traditional approaches: rigidity, need for system models, inability to adapt
+> **[DRAFT NOTE]** Should I do more research into making the baseline rule based better. For better comparrison? e.g. PID controller
 
 ### 2.3 Reinforcement Learning Fundamentals
 - Markov decision processes: states, actions, rewards, transitions
 - Policy gradient methods vs value-based methods
 - Actor-critic architectures
 - Continuous action spaces and their challenges
+> **[DRAFT NOTE]** How much of explaining is expected here?
 
 ### 2.4 Deep RL Algorithms for Continuous Control
 - TD3: twin critics, delayed policy updates, target policy smoothing — fixing DDPG's overestimation bias
@@ -40,7 +45,7 @@
 
 > **[DRAFT NOTE — DDPG]** If DDPG is included: add a section on DDPG as the predecessor to TD3, motivating why TD3 was developed.
 
-> **[DRAFT NOTE — Future algorithms]** TQC (Truncated Quantile Critics) is a natural extension of SAC with improved distributional critics and is available in sb3-contrib. Could be added as a "potential upgrade" in the discussion/future work section without requiring additional experiments.
+> **[DRAFT NOTE — Future algorithms]** TQC (Truncated Quantile Critics) extends SAC with distributional critics and truncation to reduce overestimation bias (Kuznetsov et al., "Controlling Overestimation Bias with Truncated Mixture of Continuous Distributional Quantile Critics", ICML 2020, arXiv:2005.04269). Available in sb3-contrib. Could be added as a "potential upgrade" in the discussion/future work section without requiring additional experiments.
 
 ### 2.5 RL for Building Control
 - Survey of prior work applying RL to HVAC
@@ -54,7 +59,9 @@
 - Finite difference method (FDM) for thermal simulation
 - Building representation: cells, materials, zones
 - Weather models and data sources
-- Occupancy models (deterministic step, constant, randomized)
+- Fixed working-hours occupancy schedule (comfort band active during office hours only)
+
+> **[DRAFT NOTE — Occupancy]** Currently using a fixed schedule (office hours). SBSim supports randomized occupancy, should we add that?
 
 ### 3.2 Available Building Configurations
 - Floorplan descriptions: small office (4 zones, 72 m²) and large office floor (9 zones, 450 m²)
@@ -84,7 +91,7 @@
   - Temporal features (cyclic sin/cos encoding of hour and day-of-week, weekend flag)
   - Supply air and boiler setpoints
   - Ambient temperature and trend (rate of change)
-  - Weather forecast (1h, 3h, 6h ahead) for anticipatory control
+  - Weather forecast (1h, 3h, 6h ahead)
   - Real-time energy prices (Belpex electricity, ZTP gas) — normalized to [-1, 1]
 - Observation normalization via VecNormalize (running statistics, clip at 10.0)
 
@@ -103,8 +110,8 @@
 - Comfort penalty: quadratic violation from comfort band (zones averaged)
 - Energy cost: real Belpex/ZTP prices (USD) instead of raw Watts — gas cost corrected for boiler efficiency (0.88)
 - Smoothness penalty: penalizing abrupt action changes to discourage oscillation
-- Night setback: reducing comfort floor outside working hours
-- Center bonus: small incentive for temperatures near band midpoint during occupied hours
+- Night setback: reducing comfort floor outside working hours (fixed schedule)
+- Center bonus: small incentive for temperatures near band midpoint during working hours
 - Energy weight parameter as comfort-vs-efficiency trade-off knob
 
 ### 4.5 Real Energy Price Integration
@@ -112,7 +119,7 @@
 - EEX ZTP monthly gas prices (EUR/MWh → USD/1000 ft³, using sbsim energy content constant)
 - Boiler thermal efficiency correction (0.88, condensing gas boiler per EN 15316 / JRC BAT reference)
 - Prices included in observation space enabling price-aware control
-- Rationale: enabling economically meaningful optimization and demand-response behaviour
+- Rationale: This allows the agent to optimize for actual energy cost and learn to shift heating load away from expensive hours.
 
 ## 5. Experimental Setup
 
@@ -133,15 +140,17 @@
   - Off-hours: all actuators off
 - Why this baseline is representative of conventional practice
 
+ > **[DRAFT NOTE]** Should the baseline be better?
+
 ### 5.3 Training Protocol
 - Data splits: train (Oct 2019 – Mar 2023), test (Oct 2023 – Mar 2024)
 - Heating season focus and rationale (Belgian climate, winter-dominant energy use)
 - Chunked training: random episode start times sampled within training period
-- Total training budget: ~5M timesteps (~15h overnight run)
+- Total training budget: ~5M timesteps (~15h overnight run), We are at 1M now.
 - Reward and observation normalization strategy
 - Seed management and reproducibility
 
-> **[DRAFT NOTE — Data split]** The validation period (Oct 2022 – Mar 2023) was merged into the training set since no hyperparameter tuning is performed on it — adding one extra winter improves coverage without sacrificing test integrity. If hyperparameter tuning is added later, a separate validation split should be reintroduced.
+> **[DRAFT NOTE — Data split]** The validation period (Oct 2022 – Mar 2023) was merged into the training set since no hyperparameter tuning is performed on it. If hyperparameter tuning is added later, a separate validation split should be reintroduced.
 
 > **[DRAFT NOTE — Data expansion]** If results show poor generalization, extending training data beyond 2023 (adding 2023-2024 winter to training, shifting test to 2024-2025) is an option. Requires extending Belpex and ZTP price data.
 
@@ -172,8 +181,7 @@
   - Thermal comfort metrics (discomfort degree-hours, % time outside band, max deviation)
   - Energy efficiency metrics (total consumption, cost in USD)
   - Reward breakdown (comfort vs energy vs smoothness contributions)
-- Pareto analysis: comfort-energy trade-off across algorithms
-- Cost vs comfort scatter plot
+- Cost vs comfort scatter plot: showing which algorithm achieves the best trade-off between energy savings and thermal comfort
 
 ### 6.3 RL vs Baseline Controller
 - Head-to-head comparison per algorithm against thermostat baseline
@@ -183,7 +191,7 @@
 
 ### 6.4 Behavioral Analysis
 - Episode trace analysis: temperature profiles, action patterns, energy consumption over time
-- Anticipatory behavior: do agents pre-heat before occupancy or price spikes?
+- Proactive behavior: do agents pre-heat before working hours or price spikes?
 - Night setback exploitation: how agents handle unoccupied periods
 - Multi-zone coordination: per-zone reheat/damper strategies
 
@@ -196,7 +204,7 @@
 
 ### 7.1 Interpretation of Results
 - Why SAC/TD3 perform as they do (connecting to algorithmic properties)
-- Role of entropy regularization (SAC) vs deterministic policies (TD3)
+- Role of the maximum entropy objective (SAC) vs deterministic policies (TD3) — SAC: Haarnoja et al., ICML 2018 (arXiv:1801.01290, Section 3.2); TD3: Fujimoto et al., ICML 2018 (arXiv:1802.09477, Sections 4.1–4.2)
 - Sample efficiency vs final performance trade-offs
 
 ### 7.2 Design Decisions and Their Impact
@@ -211,12 +219,16 @@
 - Safety constraints and deployment guardrails
 - Generalization across buildings, climates, and seasons
 
+> **[DRAFT NOTE]** The points above are not studied in this thesis. Should this section be kept as a theoretical discussion, or into limitations/future work?
+
 ### 7.4 Limitations
 - Single weather location (Brussels) and heating-season focus
-- Simplified occupancy models
+- Fixed deterministic occupancy schedule (no stochastic arrival/departure)
 - No cooling-dominated scenarios
-- Limited hyperparameter tuning budget
+- Limited hyperparameter tuning: defaults from literature used, no systematic grid search or Bayesian optimization
 - Simulation fidelity vs real-world complexity
+
+> **[DRAFT NOTE]** Should a basic hyperparameter search be added (e.g. learning rate, network size)? Requires significant extra compute.
 
 ## 8. Conclusion
 

@@ -197,7 +197,7 @@ def get_base_params() -> dict:
     return {
         # Sim
         "time_step_sec": 60 * 10,
-        "max_steps": int(7 * 24 * 3600 / 60),
+        "max_steps": int(7 * 24 * 3600 / (60 * 10)),  # 7 days at 600s/step = 1008
         "working_hours":  (8.0, 18.0),
         "floorplan": "headquarters_floor",  # "single_room" for original 1-zone layout
 

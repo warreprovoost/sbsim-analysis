@@ -819,7 +819,7 @@ def run_rl_setup(
     train_period_end="2022-03-31",
     val_period_start="2022-10-01",
     val_period_end="2023-03-24",
-    test_period_start="2023-10-01",
+    test_period_start="2023-12-01",
     test_period_end="2024-03-24",
     **train_kwargs,
 ) -> Dict[str, Any]:
@@ -975,14 +975,37 @@ def _merge_factory_kwargs(
         merged["training_mode"] = training_mode
     return merged
 
-def _extract_action_channels(action: np.ndarray) -> Dict[str, float]:
+def _extract_action_channels(action: np.ndarray, action_design: str = "reheat_per_zone") -> Dict[str, float]:
+    """Extract action channels into named columns, accounting for action_design layout.
+
+    Action vector layout by design:
+      reheat_per_zone : [supply, boiler, shared_damper, reheat_z0, reheat_z1, ...]
+      damper_per_zone : [supply, boiler, shared_reheat, damper_z0, damper_z1, ...]
+      full_per_zone   : [supply, boiler, reheat_z0, ..., reheat_zN, damper_z0, ..., damper_zN]
+    """
     a = np.asarray(action, dtype=np.float32).flatten()
-    return {
-        "action_supply":       float(a[0]) if len(a) > 0 else np.nan,
-        "action_boiler":       float(a[1]) if len(a) > 1 else np.nan,
-        "action_reheat":       float(a[2]) if len(a) > 2 else np.nan,   # shared reheat
-        "action_damper_mean":  float(np.mean(a[3:])) if len(a) > 3 else np.nan,  # mean per-zone damper
+    n_extra = max(len(a) - 2, 0)  # elements after supply + boiler
+
+    row: Dict[str, float] = {
+        "action_supply": float(a[0]) if len(a) > 0 else np.nan,
+        "action_boiler": float(a[1]) if len(a) > 1 else np.nan,
     }
+
+    if action_design == "reheat_per_zone":
+        # a[2] = shared damper, a[3:] = per-zone reheat
+        row["action_damper_shared"] = float(a[2]) if len(a) > 2 else np.nan
+        row["action_reheat_mean"]   = float(np.mean(a[3:])) if len(a) > 3 else np.nan
+    elif action_design == "damper_per_zone":
+        # a[2] = shared reheat, a[3:] = per-zone dampers
+        row["action_reheat_shared"] = float(a[2]) if len(a) > 2 else np.nan
+        row["action_damper_mean"]   = float(np.mean(a[3:])) if len(a) > 3 else np.nan
+    else:  # full_per_zone
+        # a[2:2+n] = per-zone reheat, a[2+n:] = per-zone dampers  (n = n_extra // 2)
+        n = n_extra // 2
+        row["action_reheat_mean"] = float(np.mean(a[2:2+n])) if n > 0 else np.nan
+        row["action_damper_mean"] = float(np.mean(a[2+n:])) if n > 0 else np.nan
+
+    return row
 
 
 def _discomfort_degree_hours(df: pd.DataFrame, dt_sec: float) -> float:
@@ -1010,6 +1033,7 @@ def _run_episode_trace(
     policy_fn,
     policy_name: str,
     seed: Optional[int] = None,
+    action_design: str = "reheat_per_zone",
 ) -> Tuple[pd.DataFrame, Dict[str, float], Tuple[float, float]]:
     obs, _ = env.reset(seed=seed)
     done = False
@@ -1064,7 +1088,7 @@ def _run_episode_trace(
             "comfort_low_c": float(info.get("comfort_low_c", env.comfort_band_k[0] - 273.15)),
             "comfort_high_c": float(info.get("comfort_high_c", env.comfort_band_k[1] - 273.15)),
         }
-        row.update(_extract_action_channels(action))
+        row.update(_extract_action_channels(action, action_design=action_design))
         rows.append(row)
 
         ep_reward += float(reward)
@@ -1239,11 +1263,13 @@ def _compare_period_rl_vs_baseline(
             if _vn is not None:
                 obs = _vn.normalize_obs(obs)
             return trainer.model.predict(obs, deterministic=_det)[0]
+        _action_design = getattr(env_rl, "action_design", "reheat_per_zone")
         rl_df, rl_m, comfort_band_c = _run_episode_trace(
             env_rl,
             _rl_policy,
             "rl",
             seed=ep,
+            action_design=_action_design,
         )
         env_rl.close()
 
@@ -1259,6 +1285,7 @@ def _compare_period_rl_vs_baseline(
             lambda obs, env: baseline.get_action(obs, env),
             "baseline",
             seed=ep,
+            action_design=_action_design,
         )
         env_b.close()
 
@@ -1271,11 +1298,13 @@ def _compare_period_rl_vs_baseline(
                 rl_df, comfort_band_c,
                 title=f"{period_name.upper()} Episode {ep} - RL",
                 fig_path=os.path.join(period_dir, f"episode_{ep:02d}_rl_plot.png"),
+                action_design=_action_design,
             )
             _plot_episode_trace_6panel(
                 b_df, comfort_band_c,
                 title=f"{period_name.upper()} Episode {ep} - Baseline",
                 fig_path=os.path.join(period_dir, f"episode_{ep:02d}_baseline_plot.png"),
+                action_design=_action_design,
             )
             _plot_energy_prices(
                 rl_df,
@@ -1378,7 +1407,7 @@ def compare_rl_vs_baseline(
     save_traces: bool = False,
     val_period_start="2022-10-01",
     val_period_end="2023-03-24",
-    test_period_start="2023-10-01",
+    test_period_start="2023-12-01",
     test_period_end="2024-03-24",
 ) -> Dict[str, Any]:
     """
@@ -1504,6 +1533,7 @@ def _plot_episode_trace_6panel(
     title: str = "",
     fig_path: Optional[str] = None,
     figsize: Tuple[int, int] = (18, 24),
+    action_design: str = "reheat_per_zone",
 ) -> plt.Figure:
     """
     Plot a 7-panel episode trace:
@@ -1627,13 +1657,28 @@ def _plot_episode_trace_6panel(
         ax_reward.set_ylabel("Reward")
     ax_reward.grid(alpha=0.25)
 
-    # --- 6) Actions ---
-    action_cols = {
-        "action_supply":      "Supply air",
-        "action_boiler":      "Boiler",
-        "action_reheat":      "Reheat (shared)",
-        "action_damper_mean": "Damper mean",
-    }
+    # --- 7) Actions — labels depend on action_design ---
+    if action_design == "reheat_per_zone":
+        action_cols = {
+            "action_supply":        "Supply air",
+            "action_boiler":        "Boiler",
+            "action_damper_shared": "Damper (shared)",
+            "action_reheat_mean":   "Reheat mean (per-zone)",
+        }
+    elif action_design == "damper_per_zone":
+        action_cols = {
+            "action_supply":        "Supply air",
+            "action_boiler":        "Boiler",
+            "action_reheat_shared": "Reheat (shared)",
+            "action_damper_mean":   "Damper mean (per-zone)",
+        }
+    else:  # full_per_zone
+        action_cols = {
+            "action_supply":      "Supply air",
+            "action_boiler":      "Boiler",
+            "action_reheat_mean": "Reheat mean (per-zone)",
+            "action_damper_mean": "Damper mean (per-zone)",
+        }
     for col, lbl in action_cols.items():
         if col in df.columns:
             ax_act.step(df["timestamp"], df[col], where="post",
