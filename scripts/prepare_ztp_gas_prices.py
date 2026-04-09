@@ -6,9 +6,10 @@ Output: thesis/weather_data/ztp_gas_prices.parquet
   - Column 'usd_per_1000ft3': converted price used by NaturalGasEnergyCost
 
 Conversion: EUR/MWh → USD/1000 ft³
-  1 MWh natural gas ≈ 35.315 thousand cubic feet (standard conditions)
+  sbsim constant: KWH_PER_KFT3_GAS = 293.07107  →  1000 ft³ = 293.07 kWh
+  So 1 MWh = 1000/293.07107 × 1000 ft³ ≈ 3.412 × 1000 ft³
   1 EUR ≈ 1.08 USD
-  usd_per_1000ft3 = eur_per_mwh * 1.08 / 35.315
+  usd_per_1000ft3 = eur_per_mwh * 1.08 / (1000 / 293.07107)
 """
 
 import pandas as pd
@@ -18,7 +19,8 @@ EXCEL_PATH = "/user/gent/453/vsc45342/thesis/weather_data/eex-ztp-gas-spot--c--e
 OUT_PATH   = "/user/gent/453/vsc45342/thesis/weather_data/ztp_gas_prices.parquet"
 
 EUR_TO_USD = 1.08
-MWH_TO_1000FT3 = 35.315  # 1 MWh gas ≈ 35.315 thousand cubic feet
+KWH_PER_KFT3_GAS = 293.07107  # sbsim constant: 1000 ft³ = 293.07 kWh
+MWH_TO_1000FT3 = 1000.0 / KWH_PER_KFT3_GAS  # ≈ 3.412 (1 MWh = 3.412 × 1000 ft³)
 
 MONTH_MAP = {
     "Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4, "May": 5, "Jun": 6,

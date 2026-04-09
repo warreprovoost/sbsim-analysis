@@ -1096,32 +1096,55 @@ def _plot_comparison_boxplots(
     title: str = "",
 ) -> plt.Figure:
     """
-    Two-panel box plot comparing RL vs Baseline per episode:
-      Left:  Energy cost (USD / episode)
-      Right: Discomfort (°C·h / episode)
-
-    Each dot is one evaluation episode — shows spread, not just means.
+    Four-panel box plot comparing RL vs Baseline per episode:
+      1. Energy cost (USD / episode)
+      2. Discomfort (°C·h / episode)
+      3. Time outside comfort (% of timesteps)
+      4. Max temperature deviation (°C)
     """
-    fig, (ax_cost, ax_comfort) = plt.subplots(1, 2, figsize=(10, 6))
+    fig, axes = plt.subplots(1, 4, figsize=(18, 6))
     fig.suptitle(title, fontsize=13, fontweight="bold")
+    ax_cost, ax_comfort, ax_pct, ax_max = axes
+
+    rl_color, bl_color = "#4c9be8", "#f4a261"
 
     # --- Energy cost ---
     cost_data = [df["rl_energy_cost_usd"].to_numpy(), df["baseline_energy_cost_usd"].to_numpy()]
     bp1 = ax_cost.boxplot(cost_data, labels=["RL", "Baseline"], patch_artist=True, widths=0.5)
-    bp1["boxes"][0].set_facecolor("#4c9be8")
-    bp1["boxes"][1].set_facecolor("#f4a261")
+    bp1["boxes"][0].set_facecolor(rl_color)
+    bp1["boxes"][1].set_facecolor(bl_color)
     ax_cost.set_ylabel("Energy cost (USD / episode)")
     ax_cost.set_title("Energy cost")
     ax_cost.grid(axis="y", alpha=0.3)
 
-    # --- Discomfort ---
+    # --- Discomfort degree-hours ---
     dis_data = [df["rl_discomfort_deg_h"].to_numpy(), df["baseline_discomfort_deg_h"].to_numpy()]
     bp2 = ax_comfort.boxplot(dis_data, labels=["RL", "Baseline"], patch_artist=True, widths=0.5)
-    bp2["boxes"][0].set_facecolor("#4c9be8")
-    bp2["boxes"][1].set_facecolor("#f4a261")
+    bp2["boxes"][0].set_facecolor(rl_color)
+    bp2["boxes"][1].set_facecolor(bl_color)
     ax_comfort.set_ylabel("Discomfort (°C·h / episode)")
     ax_comfort.set_title("Thermal discomfort")
     ax_comfort.grid(axis="y", alpha=0.3)
+
+    # --- % timesteps outside comfort ---
+    if "rl_pct_outside_comfort" in df.columns:
+        pct_data = [df["rl_pct_outside_comfort"].to_numpy(), df["baseline_pct_outside_comfort"].to_numpy()]
+        bp3 = ax_pct.boxplot(pct_data, labels=["RL", "Baseline"], patch_artist=True, widths=0.5)
+        bp3["boxes"][0].set_facecolor(rl_color)
+        bp3["boxes"][1].set_facecolor(bl_color)
+    ax_pct.set_ylabel("Time outside comfort (%)")
+    ax_pct.set_title("% Outside comfort")
+    ax_pct.grid(axis="y", alpha=0.3)
+
+    # --- Max temperature deviation ---
+    if "rl_max_temp_deviation_c" in df.columns:
+        max_data = [df["rl_max_temp_deviation_c"].to_numpy(), df["baseline_max_temp_deviation_c"].to_numpy()]
+        bp4 = ax_max.boxplot(max_data, labels=["RL", "Baseline"], patch_artist=True, widths=0.5)
+        bp4["boxes"][0].set_facecolor(rl_color)
+        bp4["boxes"][1].set_facecolor(bl_color)
+    ax_max.set_ylabel("Max deviation (°C)")
+    ax_max.set_title("Worst-case violation")
+    ax_max.grid(axis="y", alpha=0.3)
 
     plt.tight_layout()
 
