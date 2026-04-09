@@ -48,7 +48,7 @@ PRESETS = {
         total_timesteps=1_000_000,
         chunk_timesteps=50_000,   # ~5 full episodes per chunk (1 episode = 10,080 steps at 60s/7days)
         episode_days=7,
-        n_eval_episodes=10,
+        n_eval_episodes=30,
         training_mode="full",
         eval_training_mode="full",
         description="Full training with energy penalty — 1M steps, 7-day episodes, 60s timestep",
@@ -191,6 +191,11 @@ def parse_args():
         help="Skip RL vs baseline comparison after training.",
     )
     parser.add_argument(
+        "--no_val",
+        action="store_true",
+        help="Skip validation period in comparison, only run test.",
+    )
+    parser.add_argument(
         "--unique_run",
         action="store_true",
         help="Add timestamp to output dir to avoid overwrites.",
@@ -296,6 +301,7 @@ def main():
         action_design=args.action_design,
         wandb_run=wandb_run,
         wandb_finish=False,  # keep run alive for compare logging
+        train_period_end="2023-03-31",  # include 2022-2023 winter (val period no longer used)
         **_extra_train_kwargs,
     )
 
@@ -307,17 +313,37 @@ def main():
     if not args.no_compare:
         print("\n--- RL vs BASELINE COMPARISON ---")
         compare_dir = os.path.join(output_dir, "compare")
-        compare_results = compare_rl_vs_baseline(
-            trainer=res["trainer"],
-            output_dir=compare_dir,
-            n_episodes=preset["n_eval_episodes"],
-            episode_days=preset["episode_days"],
-            seed=args.seed + 99,
-            deterministic=True,
-            training_mode=preset["eval_training_mode"],
-            n_plot_episodes=2 if args.mode != "short" else 1,
-            verbose=True,
-        )
+        if args.no_val:
+            from smart_control_analysis.rl_trainer import _compare_period_rl_vs_baseline
+            os.makedirs(compare_dir, exist_ok=True)
+            test_df, test_summary = _compare_period_rl_vs_baseline(
+                trainer=res["trainer"],
+                params_template=res["trainer"].base_params.copy(),
+                period_name="test",
+                period_start="2023-10-01",
+                period_end="2024-03-24",
+                output_dir=compare_dir,
+                n_episodes=preset["n_eval_episodes"],
+                episode_days=preset["episode_days"],
+                deterministic=True,
+                seed=args.seed + 99,
+                training_mode=preset["eval_training_mode"],
+                n_plot_episodes=2 if args.mode != "short" else 1,
+                verbose=True,
+            )
+            compare_results = {"test_results": test_summary, "summary": test_summary}
+        else:
+            compare_results = compare_rl_vs_baseline(
+                trainer=res["trainer"],
+                output_dir=compare_dir,
+                n_episodes=preset["n_eval_episodes"],
+                episode_days=preset["episode_days"],
+                seed=args.seed + 99,
+                deterministic=True,
+                training_mode=preset["eval_training_mode"],
+                n_plot_episodes=2 if args.mode != "short" else 1,
+                verbose=True,
+            )
 
         # only print/log dict sections that are actual metric maps
         for section in ("val_results", "test_results", "summary"):
