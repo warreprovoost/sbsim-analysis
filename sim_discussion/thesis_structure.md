@@ -9,8 +9,10 @@
 - Context: energy consumption in buildings, HVAC as dominant contributor
 - Problem: traditional rule-based HVAC controllers are rigid; optimal control is hard due to complex thermodynamics, variable occupancy, and fluctuating energy prices
 - Opportunity: reinforcement learning as a data-driven approach to adaptive building control
-- Research question: how do different continuous-control RL algorithms (SAC, TD3, DDPG) compare for HVAC optimization, and can they outperform a well-tuned rule-based baseline?
+- Research question: how do different continuous-control RL algorithms (SAC, TD3) compare for HVAC optimization, and can they outperform a well-tuned rule-based baseline?
 - Contribution overview and thesis outline
+
+> **[DRAFT NOTE]** DDPG may be added as a third algorithm if time permits. It serves as a historical baseline that TD3 directly improves upon, giving a nice "algorithmic evolution" narrative. Confirm with supervisors whether this is worth the extra training cost.
 
 ## 2. Background & Literature Review
 
@@ -32,10 +34,13 @@
 - Continuous action spaces and their challenges
 
 ### 2.4 Deep RL Algorithms for Continuous Control
-- DDPG: deterministic policy gradients with replay buffer and target networks
-- TD3: twin critics, delayed policy updates, target policy smoothing
+- TD3: twin critics, delayed policy updates, target policy smoothing — fixing DDPG's overestimation bias
 - SAC: maximum entropy RL, automatic temperature tuning, stochastic policies
 - Comparison of theoretical properties (exploration, stability, sample efficiency)
+
+> **[DRAFT NOTE — DDPG]** If DDPG is included: add a section on DDPG as the predecessor to TD3, motivating why TD3 was developed.
+
+> **[DRAFT NOTE — Future algorithms]** TQC (Truncated Quantile Critics) is a natural extension of SAC with improved distributional critics and is available in sb3-contrib. Could be added as a "potential upgrade" in the discussion/future work section without requiring additional experiments.
 
 ### 2.5 RL for Building Control
 - Survey of prior work applying RL to HVAC
@@ -52,9 +57,11 @@
 - Occupancy models (deterministic step, constant, randomized)
 
 ### 3.2 Available Building Configurations
-- Floorplan descriptions: single_room, office_4room, corporate_floor, headquarters_floor
+- Floorplan descriptions: small office (4 zones, 72 m²) and large office floor (9 zones, 450 m²)
 - Zone connectivity and multi-zone thermodynamics
-- Scalability characteristics (1 to 16 zones)
+- Scalability characteristics
+
+> **[DRAFT NOTE]** If time permits, the headquarters_floor (largest configuration) could be tested as an upper bound on complexity.
 
 ### 3.3 Simulator Performance and Optimization
 - Bottleneck analysis: FDM solver as computational hotspot
@@ -68,17 +75,17 @@
 ### 4.1 Gymnasium Wrapper (BuildingGymEnv)
 - Bridging SBSim's API to the Gymnasium interface
 - Episode structure: 7-day episodes with configurable start times
-- Time step selection (600s) and its implications
+- Time step: 600s (10 minutes) and its implications
 
 ### 4.2 Observation Space
-- Design choices and rationale for each feature group:
+- Design choices and rationale for each feature group (30 features total for 4-zone building):
   - Zone temperatures and comfort errors (normalized around comfort midpoint)
   - Previous actions (action echo for temporal context)
   - Temporal features (cyclic sin/cos encoding of hour and day-of-week, weekend flag)
   - Supply air and boiler setpoints
   - Ambient temperature and trend (rate of change)
   - Weather forecast (1h, 3h, 6h ahead) for anticipatory control
-  - Real-time energy prices (Belpex electricity, ZTP gas)
+  - Real-time energy prices (Belpex electricity, ZTP gas) — normalized to [-1, 1]
 - Observation normalization via VecNormalize (running statistics, clip at 10.0)
 
 ### 4.3 Action Space Design
@@ -89,31 +96,33 @@
   - full_per_zone: full per-zone control (highest dimensionality)
 - Action space dimensionality scaling with number of zones
 - Physical constraints and clamping (e.g., boiler >= outdoor temp + 1K)
+- Action space comparison conducted on small office (4-zone) building
 
 ### 4.4 Reward Function
 - Design philosophy: balancing thermal comfort, energy efficiency, and control smoothness
 - Comfort penalty: quadratic violation from comfort band (zones averaged)
-- Energy penalty: weighted sum of blower, air handler, boiler, and pump power
+- Energy cost: real Belpex/ZTP prices (USD) instead of raw Watts — gas cost corrected for boiler efficiency (0.88)
 - Smoothness penalty: penalizing abrupt action changes to discourage oscillation
-- Night setback: reducing comfort floor outside working hours (2-4K reduction)
+- Night setback: reducing comfort floor outside working hours
 - Center bonus: small incentive for temperatures near band midpoint during occupied hours
-- Monetary cost mode: using real Belpex/ZTP prices instead of raw Watts
 - Energy weight parameter as comfort-vs-efficiency trade-off knob
 
 ### 4.5 Real Energy Price Integration
-- Belpex hourly electricity spot prices (Belgium market)
-- EEX ZTP monthly gas prices
-- Unit conversions and normalization to align with reward scale
-- Rationale: enabling economically meaningful optimization
+- Belpex hourly electricity spot prices (Belgian market, EUR/MWh → USD/Ws)
+- EEX ZTP monthly gas prices (EUR/MWh → USD/1000 ft³, using sbsim energy content constant)
+- Boiler thermal efficiency correction (0.88, condensing gas boiler per EN 15316 / JRC BAT reference)
+- Prices included in observation space enabling price-aware control
+- Rationale: enabling economically meaningful optimization and demand-response behaviour
 
 ## 5. Experimental Setup
 
 ### 5.1 Algorithms and Hyperparameters
 - SAC configuration: learning rate, replay buffer size, batch size, network architecture, entropy tuning
 - TD3 configuration: twin critics, delayed updates, target policy noise
-- DDPG configuration: as baseline continuous-control algorithm
 - Common settings: MlpPolicy, VecNormalize, training frequency
 - Justification of hyperparameter choices
+
+> **[DRAFT NOTE — DDPG]** If included: add DDPG configuration here as well.
 
 ### 5.2 Baseline Controller
 - Thermostat hysteresis controller design
@@ -125,25 +134,29 @@
 - Why this baseline is representative of conventional practice
 
 ### 5.3 Training Protocol
-- Data splits: train (2019-10 to 2022-03), validation (2022-10 to 2023-03), test (2023-10 to 2024-03)
-- Heating season focus and rationale
-- Chunked training: random episode start times within training period
-- Total training budget (1M-10M timesteps)
+- Data splits: train (Oct 2019 – Mar 2023), test (Oct 2023 – Mar 2024)
+- Heating season focus and rationale (Belgian climate, winter-dominant energy use)
+- Chunked training: random episode start times sampled within training period
+- Total training budget: ~5M timesteps (~15h overnight run)
 - Reward and observation normalization strategy
 - Seed management and reproducibility
 
+> **[DRAFT NOTE — Data split]** The validation period (Oct 2022 – Mar 2023) was merged into the training set since no hyperparameter tuning is performed on it — adding one extra winter improves coverage without sacrificing test integrity. If hyperparameter tuning is added later, a separate validation split should be reintroduced.
+
+> **[DRAFT NOTE — Data expansion]** If results show poor generalization, extending training data beyond 2023 (adding 2023-2024 winter to training, shifting test to 2024-2025) is an option. Requires extending Belpex and ZTP price data.
+
 ### 5.4 Evaluation Protocol
-- Deterministic policy evaluation on validation/test periods
+- Deterministic policy evaluation on test period only
 - Metrics collected per episode:
   - Cumulative reward
   - Comfort penalty and discomfort degree-hours
   - Percentage of steps outside comfort band and maximum temperature deviation
   - Total energy consumption and energy cost (USD)
 - Head-to-head RL vs baseline comparison on identical episodes
-- Statistical reporting: mean/std across multiple episode starts
+- Statistical reporting: mean/std across multiple episode starts (≥30 episodes)
 
 ### 5.5 Computational Infrastructure
-- Hardware: HPC cluster (PBS), CPU-focused training
+- Hardware: HPC cluster (Slurm/donphan), GPU-accelerated training (NVIDIA A2, 16GB)
 - Training time and resource requirements
 - Experiment tracking via Weights & Biases
 
@@ -152,15 +165,15 @@
 ### 6.1 Training Dynamics
 - Learning curves per algorithm (episode reward over timesteps)
 - Convergence speed comparison
-- Training stability (reward variance, catastrophic forgetting)
+- Training stability (reward variance)
 
-### 6.2 Algorithm Comparison
-- Validation-period performance: SAC vs TD3 vs DDPG
-  - Thermal comfort metrics (discomfort degree-hours, % time outside band)
+### 6.2 Algorithm Comparison (SAC vs TD3)
+- Test-period performance
+  - Thermal comfort metrics (discomfort degree-hours, % time outside band, max deviation)
   - Energy efficiency metrics (total consumption, cost in USD)
   - Reward breakdown (comfort vs energy vs smoothness contributions)
-- Statistical significance of differences
 - Pareto analysis: comfort-energy trade-off across algorithms
+- Cost vs comfort scatter plot
 
 ### 6.3 RL vs Baseline Controller
 - Head-to-head comparison per algorithm against thermostat baseline
@@ -173,23 +186,22 @@
 - Anticipatory behavior: do agents pre-heat before occupancy or price spikes?
 - Night setback exploitation: how agents handle unoccupied periods
 - Multi-zone coordination: per-zone reheat/damper strategies
-- Action smoothness: oscillation and bang-bang behavior
 
 ### 6.5 Sensitivity Analysis
 - Effect of energy weight parameter on comfort-energy trade-off
-- Action space design comparison (reheat_per_zone vs damper_per_zone vs full_per_zone)
-- Building complexity: single room vs multi-zone performance scaling
+- Action space design comparison (reheat_per_zone vs damper_per_zone vs full_per_zone) on 4-zone building
+- Building complexity: 4-zone small office vs 9-zone large office floor (450 m²)
 
 ## 7. Discussion
 
 ### 7.1 Interpretation of Results
-- Why SAC/TD3/DDPG perform as they do (connecting to algorithmic properties)
-- Role of entropy regularization (SAC) vs deterministic policies (TD3/DDPG)
+- Why SAC/TD3 perform as they do (connecting to algorithmic properties)
+- Role of entropy regularization (SAC) vs deterministic policies (TD3)
 - Sample efficiency vs final performance trade-offs
 
 ### 7.2 Design Decisions and Their Impact
 - Reward function design: how shaping choices influenced learned behavior
-- Observation space: which features matter most for control quality
+- Observation space: which features matter most (prices, forecast, action echo)
 - Action space: expressiveness vs learnability
 - Comfort band width and night setback: effect on training signal
 
@@ -210,8 +222,9 @@
 
 - Summary of key findings
 - Recommendation: which algorithm(s) are most suitable for HVAC control and why
-- Contributions: wrapper framework, simulator optimizations, systematic comparison
+- Contributions: wrapper framework, simulator optimizations, real Belgian energy price integration, systematic comparison
 - Future work:
+  - TQC or other improved off-policy algorithms
   - Transfer learning across buildings
   - Multi-objective optimization (comfort, energy, cost simultaneously)
   - Real-building validation
@@ -239,4 +252,4 @@
 ### D. Code and Reproducibility
 - Repository structure overview
 - Instructions for reproducing experiments
-- Dependency versions (Poetry lockfile summary)
+- Dependency versions
