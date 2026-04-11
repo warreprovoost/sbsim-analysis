@@ -17,7 +17,8 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from smart_control_analysis.building_factory import building_factory, get_base_params
-from smart_control_analysis.rl_trainer import BuildingRLTrainer, compare_rl_vs_baseline
+from smart_control_analysis.rl_trainer import BuildingRLTrainer
+from smart_control_analysis.eval_plotter import compare_rl_vs_baseline
 
 
 def main():

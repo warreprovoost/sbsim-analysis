@@ -20,8 +20,8 @@ THESIS_ROOT = os.path.expanduser("~/thesis")
 sys.path.insert(0, os.path.join(THESIS_ROOT, "sbsim-analysis"))
 sys.path.insert(0, os.path.join(THESIS_ROOT, "sbsim"))
 
-from smart_control_analysis.rl_trainer import run_rl_setup, compare_rl_vs_baseline
-
+from smart_control_analysis.eval_plotter import compare_rl_vs_baseline
+from smart_control_analysis.runner import run_rl_setup
 # ─────────────────────────────────────────────
 # Presets
 # ─────────────────────────────────────────────
@@ -45,13 +45,13 @@ PRESETS = {
         description="Quick smoke test — 5k steps, full, 3-day episodes",
     ),
     "long": dict(
-        total_timesteps=1_000_000,
-        chunk_timesteps=50_000,   # ~50 full episodes per chunk (1 episode = 1,008 steps at 600s/7days)
+        total_timesteps=500_000,
+        chunk_timesteps=20_000,   # ~20 episodes per chunk → 25 different start dates per 500k steps
         episode_days=7,
         n_eval_episodes=30,
         training_mode="full",
         eval_training_mode="full",
-        description="Full training with energy penalty — 1M steps, 7-day episodes, 60s timestep",
+        description="Full training with energy penalty — 500k steps, 7-day episodes, 10min timestep",
     ),
     "long_eval1": dict(
         total_timesteps=100_000,

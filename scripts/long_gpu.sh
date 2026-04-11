@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=rl_long_new
-#SBATCH --time=8:30:00
+#SBATCH --time=12:30:00
 #SBATCH --mem=8G
 #SBATCH --cpus-per-task=2
 #SBATCH --output=/user/gent/453/vsc45342/thesis/logs/long.o%j

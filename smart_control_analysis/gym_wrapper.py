@@ -69,6 +69,7 @@ class BuildingGymEnv(gym.Env):
         occupancy_per_zone: float = 10.0,
         occupancy_kwargs: Optional[Dict[str, Any]] = None,
         energy_norm: float = 500.0,  # W — expected peak *total* energy for this building
+        cost_norm: float = 0.0082,   # USD/step — expected peak monetary cost for this building
         use_cost_reward: bool = False,  # if True, use monetary cost (USD/step) instead of W
         energy_weight: float = 2.0,  # comfort/energy trade-off: higher = more energy penalty
         action_design: str = "reheat_per_zone",  # "reheat_per_zone" | "damper_per_zone" | "full_per_zone"
@@ -108,10 +109,9 @@ class BuildingGymEnv(gym.Env):
         # Best Available Techniques (BAT) Reference Document for Large Combustion Plants. Publications Office of the EU.
         self._BOILER_EFFICIENCY: float = 0.88
 
-        # Cost norm: peak cost per step at 60s timestep.
-        # Peak boiler (113W gas, Jan) + blower (30W elec peak) for 60s ≈ $0.000161
-        # With energy_weight=1.0: peak penalty = 1.0 * 0.000161/0.000161 = 1.0 (= a 1°C violation)
-        self._cost_norm: float = 0.000161
+        # Cost norm: computed dynamically in building_factory per floorplan and timestep.
+        # With energy_weight=1.0: peak penalty ≈ 1.0 (= a 1°C violation)
+        self._cost_norm: float = float(cost_norm)
 
         zone_temps_dict = self.sim.building.get_zone_average_temps()
         self.zone_ids = sorted(zone_temps_dict.keys())  # e.g., ["room_1", "room_2"]
@@ -419,23 +419,23 @@ class BuildingGymEnv(gym.Env):
 
         for _zone_id, ziv in r.zone_reward_infos.items():
             t = float(ziv.zone_air_temperature)
-            # Linear violation in degrees C (K difference = C difference)
+            # Linear violation: 1°C off → penalty 1.0 (unscaled).
+            # cost_norm is calibrated to peak energy cost, so ew=1.0 means
+            # "1°C discomfort ≈ running all HVAC at peak price for one step".
             violation_deg = max(comfort_low_k - t, 0.0) + max(t - comfort_high_k, 0.0)
-            # Quadratic: 1°C off → 1, 4°C off → 16, 8°C off → 64
-            temp_violation = violation_deg ** 2
-            # Center bonus only during working hours — at night we don't want to incentivise
-            # cooling toward the (shifted-down) midpoint, just avoid falling below the lower floor.
+            temp_violation = min(violation_deg, 10.0)  # linear, capped at 10°C — stable gradient throughout training
+            # Center bonus only during working hours
             if is_working:
                 center_bonus = 0.5 * max(0.0, 1.0 - abs(t - comfort_mid_k) / comfort_half_band)
             else:
                 center_bonus = 0.0
 
-            w = 1.0  # always penalise (occupancy forced on)
+            w = 1.0
             weighted_violation_sum += w * (temp_violation - center_bonus)
             weight_sum += w
 
         total_comfort_penalty = (
-            weighted_violation_sum / (weight_sum + 1e-6)
+            weighted_violation_sum  # sum over zones — every zone violation counts independently
             if weight_sum > 0.0
             else 0.0
         )
@@ -498,14 +498,13 @@ class BuildingGymEnv(gym.Env):
                               total_cost: float = 0.0,
                               prev_action: Optional[np.ndarray] = None,
                               action: Optional[np.ndarray] = None) -> float:
-        # comfort_penalty: mean squared °C violation → 1°C=1, 4°C=16, 8°C=64
+        # comfort_penalty: sum of linear °C violations per zone, capped at 8°C per zone
         # energy_rate (watts mode): total W normalized by physics-based peak estimate
-        # total_cost (cost mode): USD/step normalized by cost_norm
+        # total_cost (cost mode): USD/step normalized by peak cost (all zones max, Jan 2022 prices)
         # smoothness_penalty: penalizes large action changes to discourage bang-bang control
         # energy_weight controls the comfort/energy trade-off:
-        #   2.0 → peak energy penalty = 2× a 1°C violation  (energy-focused)
-        #   1.0 → peak energy penalty = 1× a 1°C violation  (balanced)
-        #   0.5 → peak energy penalty = 0.5× a 1°C violation (comfort-focused)
+        #   1.0 → peak energy ≈ 1°C discomfort (balanced at peak)
+        #   2.0 → energy-focused, 0.5 → comfort-focused
         energy_weight = self.energy_weight
         if self.use_cost_reward:
             energy_penalty = energy_weight * total_cost / max(self._cost_norm, 1e-9) if self.occupancy_model != "step" else 0.0

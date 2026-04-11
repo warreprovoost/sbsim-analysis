@@ -144,8 +144,8 @@ def building_factory(
         air_handler=air_handler,
         boiler=boiler,
         schedule=schedule,
-        vav_max_air_flow_rate=params.get("vav_max_flow", 1.2),
-        vav_reheat_max_water_flow_rate=params.get("vav_reheat_flow", 0.1),
+        vav_max_air_flow_rate=params.get("vav_max_flow", 0.01),
+        vav_reheat_max_water_flow_rate=params.get("vav_reheat_flow", 0.001),
         zone_identifier=None,  # filled automatically from building._room_dict
     )
 
@@ -166,14 +166,29 @@ def building_factory(
     elif training_mode == "full":
         occupancy_model = "randomized"
 
-    # Peak energy estimate from first principles (all at max VAV settings):
-    # Boiler gas: flow * Cp_water * (boiler_sp - supply_air_sp)
+    # Peak energy estimate from first principles (all VAVs at max, scales with n_zones):
+    n_zones = len([k for k in building_sim.building.get_zone_average_temps() if k.startswith("room")])
     _delta_t = params.get("boiler_setpoint_celsius", 45) - params.get("ah_heating_setpoint_celsius", 18)
-    _peak_boiler_w = params.get("vav_reheat_flow", 0.001) * 4186.0 * max(_delta_t, 1.0)
-    # Blower: actual VAV flow (not rated max) * fan_pressure / fan_efficiency
+    _peak_boiler_w = params.get("vav_reheat_flow", 0.001) * 4186.0 * max(_delta_t, 1.0) * n_zones
     _peak_blower_w = (params.get("fan_pressure", 800) * params.get("vav_max_flow", 0.01)
                       / params.get("fan_efficiency", 0.7))
-    _energy_norm = _peak_boiler_w + _peak_blower_w  # W — ~124 W for default params
+    _peak_pump_w = (params.get("vav_reheat_flow", 0.001) * n_zones
+                    * 997.0 * 9.81 * params.get("pump_head", 6.1)
+                    / params.get("pump_efficiency", 1.0))
+    _energy_norm = _peak_boiler_w + _peak_blower_w + _peak_pump_w
+
+    # Cost normalization: peak cost per step (all zones at max, Jan 2022 peak prices).
+    # Paired with comfort normalization of violation_deg/1.0 so that:
+    #   ew=1.0 → 1°C discomfort ≈ running all HVAC at peak price for one step
+    #   ew=2.0 → energy-focused, ew=0.5 → comfort-focused
+    from smart_control_analysis.energy_prices import get_gas_price_usd_per_1000ft3, BELPEX_USD_PER_WS
+    _dt = float(params.get("time_step_sec", 600))
+    _boiler_efficiency = 0.88
+    _peak_gas_usd_per_j = get_gas_price_usd_per_1000ft3(pd.Timestamp("2022-01-15")) / 293.07107 / 3.6e6
+    _peak_gas_cost = _peak_gas_usd_per_j * _peak_boiler_w / _boiler_efficiency * _dt
+    _peak_elec_usd_per_ws = float(BELPEX_USD_PER_WS.quantile(0.95))
+    _peak_elec_cost = _peak_elec_usd_per_ws * (_peak_blower_w + _peak_pump_w) * _dt
+    _cost_norm = _peak_gas_cost + _peak_elec_cost
 
     env = BuildingGymEnv(
         sim=building_sim,
@@ -187,6 +202,7 @@ def building_factory(
         max_steps=params.get("max_steps", None),
         occupancy_per_zone=params.get("occupancy_per_zone", 10.0),
         energy_norm=_energy_norm,
+        cost_norm=_cost_norm,
         use_cost_reward=params.get("use_cost_reward", False),
     )
     return building_sim, env
@@ -205,7 +221,7 @@ def get_base_params() -> dict:
         # Weather
         "outdoor_low_temp": -5,
         "outdoor_high_temp": 5,
-        "convection_coefficient": 50.0,    # stronger outside exchange
+        "convection_coefficient": 20.0,    # W/m²K — moderate wind exposure, sheltered office building
         "start_timestamp": "2023-01-16 06:00:00",
         "time_zone": "Europe/Oslo",
         "weather_source": "replay",
@@ -246,9 +262,9 @@ def get_base_params() -> dict:
         "inside_wall_conductivity": 1.4,
 
         # Material properties - exterior wall
-        "exterior_wall_density": 800,
-        "exterior_wall_heat_capacity": 840,
-        "exterior_wall_conductivity": 2.0,
+        "exterior_wall_density": 1200,
+        "exterior_wall_heat_capacity": 880,
+        "exterior_wall_conductivity": 0.8,  # W/mK — older office, some insulation but still leaky
 
         # Reward
         "use_cost_reward": True,
