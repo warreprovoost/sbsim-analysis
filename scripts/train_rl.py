@@ -46,11 +46,15 @@ PRESETS = {
     ),
     "long": dict(
         total_timesteps=500_000,
-        chunk_timesteps=20_000,   # ~20 episodes per chunk → 25 different start dates per 500k steps
+        chunk_timesteps=30_000,   # ~20 episodes per chunk → 25 different start dates per 500k steps
         episode_days=7,
         n_eval_episodes=30,
         training_mode="full",
         eval_training_mode="full",
+        policy_kwargs={"net_arch": [256, 256, 256]},
+        # Curriculum: learn comfort first, ramp energy, then converge at fixed weight
+        # 0-40%: comfort only (ew=1), 40-80%: ramp 1→15, 80-100%: constant 15
+        #curriculum=[(0.3, 1.0), (0.7, 12.5), (1.0, 12.5)],
         description="Full training with energy penalty — 500k steps, 7-day episodes, 10min timestep",
     ),
     "long_eval1": dict(
@@ -281,7 +285,7 @@ def main():
     print("\n--- TRAINING ---")
     # Extract known run_rl_setup params from preset; remaining keys are algo kwargs
     _known = {"total_timesteps", "chunk_timesteps", "episode_days", "n_eval_episodes",
-              "training_mode", "eval_training_mode", "description"}
+              "training_mode", "eval_training_mode", "description", "curriculum"}
     _extra_train_kwargs = {k: v for k, v in preset.items() if k not in _known}
 
     res = run_rl_setup(
@@ -302,6 +306,7 @@ def main():
         wandb_run=wandb_run,
         wandb_finish=False,  # keep run alive for compare logging
         train_period_end="2023-03-31",  # include 2022-2023 winter (val period no longer used)
+        curriculum=preset.get("curriculum"),
         **_extra_train_kwargs,
     )
 
@@ -314,7 +319,7 @@ def main():
         print("\n--- RL vs BASELINE COMPARISON ---")
         compare_dir = os.path.join(output_dir, "compare")
         if args.no_val:
-            from smart_control_analysis.rl_trainer import _compare_period_rl_vs_baseline
+            from smart_control_analysis.eval_plotter import _compare_period_rl_vs_baseline
             os.makedirs(compare_dir, exist_ok=True)
             test_df, test_summary = _compare_period_rl_vs_baseline(
                 trainer=res["trainer"],
@@ -352,10 +357,6 @@ def main():
             for k, v in summary.items():
                 print(f"    {k}: {v:.4f}" if isinstance(v, float) else f"    {k}: {v}")
 
-        if wandb_run is not None:
-            for section in ("val_results", "test_results", "summary"):
-                summary = compare_results.get(section, {})
-                wandb_run.log({f"compare/{section}/{k}": v for k, v in summary.items()})
 
     # ── Finish ──
     if wandb_run is not None:

@@ -419,23 +419,24 @@ class BuildingGymEnv(gym.Env):
 
         for _zone_id, ziv in r.zone_reward_infos.items():
             t = float(ziv.zone_air_temperature)
+
+            if not is_working:
+                # No comfort penalty at night — let the building cool freely
+                continue
+
             # Linear violation: 1°C off → penalty 1.0 (unscaled).
-            # cost_norm is calibrated to peak energy cost, so ew=1.0 means
-            # "1°C discomfort ≈ running all HVAC at peak price for one step".
             violation_deg = max(comfort_low_k - t, 0.0) + max(t - comfort_high_k, 0.0)
-            temp_violation = min(violation_deg, 10.0)  # linear, capped at 10°C — stable gradient throughout training
-            # Center bonus only during working hours
-            if is_working:
-                center_bonus = 0.5 * max(0.0, 1.0 - abs(t - comfort_mid_k) / comfort_half_band)
-            else:
-                center_bonus = 0.0
+            temp_violation = violation_deg  # linear, unbounded — mean over zones keeps scale reasonable
+            # Small center bonus: nudges toward middle of band without forcing it
+            # 0.1 max — policy still free to ride lower edge for energy efficiency
+            center_bonus = 0.1 * max(0.0, 1.0 - abs(t - comfort_mid_k) / comfort_half_band)
 
             w = 1.0
             weighted_violation_sum += w * (temp_violation - center_bonus)
             weight_sum += w
 
         total_comfort_penalty = (
-            weighted_violation_sum  # sum over zones — every zone violation counts independently
+            weighted_violation_sum / (weight_sum + 1e-6)  # mean over zones — scale consistent with energy penalty
             if weight_sum > 0.0
             else 0.0
         )
@@ -511,11 +512,12 @@ class BuildingGymEnv(gym.Env):
         else:
             energy_penalty = energy_weight * energy_rate / max(self._energy_norm, 1.0) if self.occupancy_model != "step" else 0.0
 
-        # Small penalty on action rate-of-change (max delta per dim = 2.0)
-        # Weight 0.05 → max smoothness penalty ≈ 0.1, much smaller than comfort
+        # Smoothness penalty on action rate-of-change to prevent bang-bang control.
+        # Bang-bang wastes energy (full reheat on/off each step). delta max = 2.0 per dim.
+        # Weight 0.5 → bang-bang costs ~0.75/step, smooth control ~0.05/step.
         if prev_action is not None and action is not None:
             delta = float(np.mean(np.abs(action - prev_action)))
-            smoothness_penalty = 0.05 * delta
+            smoothness_penalty = 0.5 * delta
         else:
             smoothness_penalty = 0.0
 

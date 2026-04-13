@@ -93,7 +93,7 @@ def main():
     print()
 
     if args.no_val:
-        from smart_control_analysis.rl_trainer import _compare_period_rl_vs_baseline
+        from smart_control_analysis.eval_plotter import _compare_period_rl_vs_baseline
         os.makedirs(output_dir, exist_ok=True)
         base = trainer.base_params.copy()
         test_df, test_summary = _compare_period_rl_vs_baseline(

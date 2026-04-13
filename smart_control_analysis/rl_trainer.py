@@ -68,7 +68,6 @@ class TrainingProgressCallback(BaseCallback):
                     self.wandb_run.log(
                         {
                             "train/episode_reward": ep_r,
-                            "train/episode_length": ep_l,
                         },
                         step=current_step,
                     )
@@ -202,7 +201,7 @@ class BuildingRLTrainer:
             vec_env = DummyVecEnv(env_fns)
         else:
             vec_env = SubprocVecEnv(env_fns, start_method="spawn")
-        normalized = VecNormalize(vec_env, norm_obs=True, norm_reward=True, clip_obs=10.0)
+        normalized = VecNormalize(vec_env, norm_obs=True, norm_reward=False, clip_obs=10.0)
         self.vec_normalize = normalized
         return normalized
 
@@ -215,6 +214,7 @@ class BuildingRLTrainer:
         buffer_size: int = 500_000,
         batch_size: int = 256,
         n_envs: int = 1,
+        seed: int = 42,
         params: Optional[Dict[str, Any]] = None,
         verbose: int = 1,
         fixed_actions: Optional[Dict[int, float]] = None,
@@ -260,6 +260,7 @@ class BuildingRLTrainer:
             params = self.base_params.copy()
 
         self.algo_name = algo.lower()
+        self.seed = seed
         if self.algo_name not in ["sac", "td3", "ddpg"]:
             raise ValueError(f"Unsupported algorithm: {algo}. Choose 'sac', 'td3', or 'ddpg'.")
 
@@ -281,12 +282,14 @@ class BuildingRLTrainer:
             "learning_rate": learning_rate,
             "verbose": verbose,
             "device": "cuda" if torch.cuda.is_available() else "cpu",
+            "seed": self.seed,
         }
 
         # Algo-specific parameters
         if self.algo_name == "sac":
             common_params["buffer_size"] = buffer_size
             common_params["batch_size"] = batch_size
+            common_params.setdefault("learning_starts", 5000)  # ~35 simulated days of random exploration
             AlgoClass = SAC
         elif self.algo_name == "td3":
             common_params["buffer_size"] = buffer_size

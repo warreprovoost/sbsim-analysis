@@ -107,12 +107,20 @@ Optimization and Evaluation in the (HomeLab)
 
 ### 4.4 Reward Function
 - Design philosophy: balancing thermal comfort, energy efficiency, and control smoothness
-- Comfort penalty: quadratic violation from comfort band (zones averaged)
-- Energy cost: real Belpex/ZTP prices (USD) instead of raw Watts — gas cost corrected for boiler efficiency (0.88)
-- Smoothness penalty: penalizing abrupt action changes to discourage oscillation
-- Night setback: reducing comfort floor outside working hours (fixed schedule)
-- Center bonus: small incentive for temperatures near band midpoint during working hours
+- Comfort penalty: linear violation from comfort band, mean over zones — zero inside band, linear outside
+- Energy penalty: normalized by physics-based peak estimate; active during working hours only
+- Smoothness penalty: penalizing abrupt action changes to discourage bang-bang oscillation
+- Night setback: no comfort penalty outside working hours — agent free to let building cool
 - Energy weight parameter as comfort-vs-efficiency trade-off knob
+
+### 4.5 Energy Weight Tuning and Signal Balance
+- The energy weight controls the relative importance of energy vs comfort in the reward signal
+- Challenge: at low weights (ew=1) the agent learns excellent comfort but ignores energy cost; at high weights (ew≥4) the energy signal dominates and destroys the comfort policy
+- Root cause: when inside the comfort band, comfort penalty is zero — energy is the only gradient signal. When outside the band, comfort penalty is large. This creates a non-stationary gradient landscape as the policy improves.
+- Empirical finding: with a well-trained comfort policy, energy/comfort ratio at ew=1 is already ~20x in favor of energy (because comfort ≈ 0). Higher weights amplify this imbalance further.
+- Curriculum learning attempt: ramping energy weight from 1→15 over training — policy learned comfort in phase 1 but collapsed when energy weight increased
+- Final design: constant energy weight with smoothness penalty (0.5) to prevent bang-bang heating, which naturally reduces energy use without sacrificing comfort
+- Key insight: a policy that learns smooth proportional control is inherently more energy-efficient than one that learns on/off heating
 
 ### 4.5 Real Energy Price Integration
 - Belpex hourly electricity spot prices (Belgian market, EUR/MWh → USD/Ws)
@@ -196,7 +204,11 @@ Optimization and Evaluation in the (HomeLab)
 - Multi-zone coordination: per-zone reheat/damper strategies
 
 ### 6.5 Sensitivity Analysis
-- Effect of energy weight parameter on comfort-energy trade-off
+- Effect of energy weight parameter on comfort-energy trade-off:
+  - ew=1: excellent comfort, energy use higher than baseline (bang-bang heating)
+  - ew=4: comfort degrades, energy marginally better
+  - ew≥8: both comfort and energy worsen — gradient signal too noisy for SAC to learn
+  - Smoothness penalty as an alternative lever: reduces bang-bang without destabilizing training
 - Action space design comparison (reheat_per_zone vs damper_per_zone vs full_per_zone) on 4-zone building
 - Building complexity: 4-zone small office vs 9-zone large office floor (450 m²)
 

@@ -110,6 +110,7 @@ def run_rl_setup(
     val_period_end="2023-03-24",
     test_period_start="2023-12-01",
     test_period_end="2024-03-24",
+    curriculum: Optional[List[Tuple[float, float]]] = None,
     **train_kwargs,
 ) -> Dict[str, Any]:
     os.makedirs(output_dir, exist_ok=True)
@@ -144,12 +145,42 @@ def run_rl_setup(
     print(f"Using n_envs={n_envs}")
 
     rng = np.random.default_rng(seed)
+    val_rng = np.random.default_rng(seed + 99)  # separate rng so val starts are consistent
     trained = 0
     first_chunk = True
+    n_val_episodes_periodic = 2  # 2 episodes per checkpoint — enough to see trend without too much overhead
+
+    # Curriculum: list of (fraction_of_training, energy_weight) breakpoints
+    # Linearly interpolates between breakpoints for smooth transitions.
+    # e.g. [(0.4, 1.0), (1.0, 60.0)]
+    # means: 0-40% → constant ew=1.0, 40-100% → linear ramp 1.0 → 60.0
+    # If None, use constant energy_weight throughout
+    current_energy_weight = energy_weight
+    if curriculum is not None:
+        curriculum = sorted(curriculum, key=lambda x: x[0])
+        current_energy_weight = curriculum[0][1]
+        print(f"Curriculum: {[(f'{frac:.0%}', ew) for frac, ew in curriculum]}")
 
     while trained < total_timesteps:
+        # Update energy weight based on curriculum schedule (linear interpolation)
+        if curriculum is not None:
+            progress = trained / total_timesteps
+            if progress <= curriculum[0][0]:
+                current_energy_weight = curriculum[0][1]
+            elif progress >= curriculum[-1][0]:
+                current_energy_weight = curriculum[-1][1]
+            else:
+                for i in range(len(curriculum) - 1):
+                    f0, w0 = curriculum[i]
+                    f1, w1 = curriculum[i + 1]
+                    if f0 <= progress < f1:
+                        t = (progress - f0) / (f1 - f0)
+                        current_energy_weight = w0 + t * (w1 - w0)
+                        break
+
         chunk = min(chunk_timesteps, total_timesteps - trained)
         p = base.copy()
+        p["energy_weight"] = current_energy_weight
         p["start_timestamp"] = _sample_start_in_period(
             rng=rng,
             start=train_period_start,
@@ -163,8 +194,9 @@ def run_rl_setup(
                 algo=algo,
                 total_timesteps=chunk,
                 n_envs=n_envs,
+                seed=seed,
                 params=p,
-                verbose=1,
+                verbose=0,
                 training_mode=training_mode,
                 **train_kwargs,
             )
@@ -191,6 +223,52 @@ def run_rl_setup(
 
         trained += chunk
         print(f"Trained {trained}/{total_timesteps} timesteps")
+
+        # --- Periodic val evaluation: log real metrics (not normalized reward) to W&B ---
+        if trainer.wandb_run is not None:
+            val_discomfort, val_cost, val_comfort_penalty = [], [], []
+            for _ in range(n_val_episodes_periodic):
+                vp = base.copy()
+                vp["start_timestamp"] = _sample_start_in_period(
+                    rng=val_rng,
+                    start=val_period_start,
+                    end=val_period_end,
+                    episode_days=episode_days,
+                    time_zone=base["time_zone"],
+                ).isoformat()
+                env = trainer.create_env(params=vp, factory_kwargs={"training_mode": eval_training_mode})
+                _vn = trainer.vec_normalize
+                obs, _ = env.reset()
+                done = False
+                ep_cost, ep_discomfort, ep_comfort = 0.0, 0.0, 0.0
+                trace_rows = []
+                while not done:
+                    obs_in = _vn.normalize_obs(obs) if _vn is not None else obs
+                    action, _ = trainer.model.predict(obs_in, deterministic=True)
+                    obs, _, terminated, truncated, info = env.step(action)
+                    ep_cost += float(info.get("energy_cost_usd", 0.0))
+                    ep_comfort += float(info.get("comfort_penalty", 0.0))
+                    trace_rows.append({
+                        "room_temp_c": float(np.mean([v - 273.15 for v in env.sim.building.get_zone_average_temps().values()])),
+                        "comfort_low_c": float(info.get("comfort_low_c", env.comfort_band_k[0] - 273.15)),
+                        "comfort_high_c": float(info.get("comfort_high_c", env.comfort_band_k[1] - 273.15)),
+                    })
+                    done = terminated or truncated
+                env.close()
+                dt_sec = float(base.get("time_step_sec", 600))
+                ep_dh = _discomfort_degree_hours(pd.DataFrame(trace_rows), dt_sec)
+                val_discomfort.append(ep_dh)
+                val_cost.append(ep_cost)
+                val_comfort_penalty.append(ep_comfort)
+
+            log_dict = {
+                "val/discomfort_deg_h":    float(np.mean(val_discomfort)),
+                "val/energy_cost_usd":     float(np.mean(val_cost)),
+                "val/comfort_penalty_mean": float(np.mean(val_comfort_penalty)),
+            }
+            if curriculum is not None:
+                log_dict["train/energy_weight"] = current_energy_weight
+            trainer.wandb_run.log(log_dict, step=trained)
 
     trainer.save_model(os.path.join(output_dir, f"{algo}_2024_model"))
     trainer.save_results(output_dir)
@@ -228,17 +306,7 @@ def run_rl_setup(
         "test_std_reward": test_results["std_reward"],
     }
 
-    # log final eval to wandb if enabled
     if trainer.wandb_run is not None:
-        trainer.wandb_run.log(
-            {
-                "eval/val_mean_reward": summary["val_mean_reward"],
-                "eval/val_std_reward": summary["val_std_reward"],
-                "eval/test_mean_reward": summary["test_mean_reward"],
-                "eval/test_std_reward": summary["test_std_reward"],
-            },
-            step=int(trainer.model.num_timesteps),
-        )
         if wandb_finish:
             trainer.wandb_run.finish()
             trainer.wandb_run = None
