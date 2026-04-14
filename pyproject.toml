@@ -52,6 +52,7 @@ ipython = "^8.27.0"
 importlib-resources = { version = "*", python = "<3.11" }
 python-dotenv = "^1.1.0"
 wandb = "^0.19.11"
+sb3-contrib = "^2.3.0"
 numba = "^0.60.0"
 numpy = ">=1.24"
 

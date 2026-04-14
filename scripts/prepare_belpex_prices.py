@@ -19,10 +19,22 @@ OUT_PATH   = "/user/gent/453/vsc45342/thesis/weather_data/belpex_prices.parquet"
 
 # Training periods to keep (inclusive)
 PERIODS = [
-    ("2019-10-01", "2022-03-31"),  # train
+    ("2015-10-01", "2022-03-31"),  # train (extended)
     ("2022-10-01", "2023-03-24"),  # val
     ("2023-10-01", "2024-03-24"),  # test
 ]
+
+# Years for which we have no real data — map to a donor year with real data.
+# We reuse the donor's hourly day/night pattern so the policy still sees
+# realistic price variation (day expensive, night cheap) rather than a flat median.
+# Donor year chosen to match the target year's position in the economic cycle as
+# closely as possible given available data.
+YEAR_DONOR_MAP = {
+    2015: 2020,
+    2016: 2020,
+    2017: 2021,
+    2018: 2021,
+}
 
 # 1 EUR ≈ 1.08 USD (2023 average)
 EUR_TO_USD = 1.08
@@ -64,6 +76,34 @@ def main():
     mask = df.index.map(in_any_period)
     df = df[mask]
     print(f"Rows after period filter: {len(df)}")
+
+    # Synthesize missing years (2015-2018) by copying donor year's hourly pattern.
+    # Same month/day/hour maps to the donor year so day/night variation is preserved.
+    synthetic_parts = []
+    for target_year, donor_year in YEAR_DONOR_MAP.items():
+        donor = df[df.index.year == donor_year].copy()
+        if donor.empty:
+            print(f"  WARNING: donor year {donor_year} not found, skipping {target_year}")
+            continue
+        # Shift timestamps: replace year, keep month/day/hour
+        def _shift_year(ts, yr=target_year):
+            try:
+                return ts.replace(year=yr)
+            except ValueError:
+                return None  # leap day — drop it
+
+        new_index = donor.index.map(_shift_year)
+        synthetic = donor.copy()
+        synthetic.index = new_index
+        synthetic = synthetic[synthetic.index.notna()]  # drop leap days
+        # Only keep timestamps that fall in our periods
+        synthetic = synthetic[synthetic.index.map(in_any_period)]
+        print(f"  Synthesized {target_year} from {donor_year}: {len(synthetic)} rows")
+        synthetic_parts.append(synthetic)
+
+    if synthetic_parts:
+        df = pd.concat([df] + synthetic_parts).sort_index()
+        print(f"Total rows after synthesis: {len(df)}")
 
     # Convert EUR/MWh → USD/Ws
     df["usd_per_ws"] = df["eur_per_mwh"] * EUR_TO_USD / 1e6 / 3600.0

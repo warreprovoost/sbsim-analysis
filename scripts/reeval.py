@@ -36,6 +36,7 @@ def main():
     parser.add_argument("--val_end", default="2023-03-24")
     parser.add_argument("--test_start", default="2023-12-01")
     parser.add_argument("--test_end", default="2024-03-24")
+    parser.add_argument("--baseline_night_off", action="store_true", help="Baseline turns off all heating at night")
     args = parser.parse_args()
 
     # Load run config
@@ -111,6 +112,7 @@ def main():
             n_plot_episodes=args.n_plot_episodes,
             verbose=True,
             save_traces=args.save_traces,
+            baseline_night_off=args.baseline_night_off,
         )
         results = {"test_results": test_summary}
     else:
@@ -129,6 +131,7 @@ def main():
             val_period_end=args.val_end,
             test_period_start=args.test_start,
             test_period_end=args.test_end,
+            baseline_night_off=args.baseline_night_off,
         )
 
     for section in ("val_results", "test_results", "summary"):

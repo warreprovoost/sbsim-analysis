@@ -22,6 +22,16 @@ EUR_TO_USD = 1.08
 KWH_PER_KFT3_GAS = 293.07107  # sbsim constant: 1000 ft³ = 293.07 kWh
 MWH_TO_1000FT3 = 1000.0 / KWH_PER_KFT3_GAS  # ≈ 3.412 (1 MWh = 3.412 × 1000 ft³)
 
+# Years with no real data — map to a donor year's monthly pattern.
+# Gas prices are monthly so we copy the donor's 12-month profile.
+YEAR_DONOR_MAP = {
+    2015: 2020,
+    2016: 2020,
+    2017: 2020,
+    2018: 2020,
+    2019: 2020,  # 2019 was already filled from 2020; make it explicit
+}
+
 MONTH_MAP = {
     "Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4, "May": 5, "Jun": 6,
     "Jul": 7, "Aug": 8, "Sep": 9, "Oct": 10, "Nov": 11, "Dec": 12,
@@ -61,12 +71,14 @@ def main():
     out = pd.DataFrame(records).set_index(["year", "month"]).sort_index()
     print(out.to_string())
 
-    # 2019 is missing — use 2020 values as fallback
-    for month in range(1, 13):
-        if (2020, month) in out.index and (2019, month) not in out.index:
-            row = out.loc[(2020, month)].copy()
-            out.loc[(2019, month), :] = row
+    # Fill missing years using donor year's monthly pattern.
+    for target_year, donor_year in YEAR_DONOR_MAP.items():
+        for month in range(1, 13):
+            if (target_year, month) not in out.index and (donor_year, month) in out.index:
+                row = out.loc[(donor_year, month)].copy()
+                out.loc[(target_year, month), :] = row
     out = out.sort_index()
+    print(f"\nYears covered after donor fill: {sorted(out.index.get_level_values('year').unique())}")
 
     out.to_parquet(OUT_PATH)
     print(f"\nSaved → {OUT_PATH}")

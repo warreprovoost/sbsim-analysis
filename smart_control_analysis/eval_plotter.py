@@ -270,6 +270,7 @@ def _compare_period_rl_vs_baseline(
     n_plot_episodes: int,
     verbose: bool = True,
     save_traces: bool = False,
+    baseline_night_off: bool = False,
 ) -> Tuple[pd.DataFrame, Dict[str, float]]:
     rng = np.random.default_rng(seed)
     rows = []
@@ -324,6 +325,7 @@ def _compare_period_rl_vs_baseline(
             comfort_band_k=env_b.comfort_band_k,
             working_hours=env_b.working_hours,
             night_setback_k=getattr(env_b, "night_setback_k", 0.0),
+            night_off=baseline_night_off,
         )
         b_df, b_m, _ = _run_episode_trace(
             env_b,
@@ -454,6 +456,7 @@ def compare_rl_vs_baseline(
     val_period_end="2023-03-24",
     test_period_start="2023-12-01",
     test_period_end="2024-03-24",
+    baseline_night_off: bool = False,
 ) -> Dict[str, Any]:
     """
     Compare trained RL policy vs thermostat baseline on winter val/test splits.
@@ -480,6 +483,7 @@ def compare_rl_vs_baseline(
         n_plot_episodes=n_plot_episodes,
         verbose=verbose,
         save_traces=save_traces,
+        baseline_night_off=baseline_night_off,
     )
     test_df, test_summary = _compare_period_rl_vs_baseline(
         trainer=trainer,
@@ -496,6 +500,7 @@ def compare_rl_vs_baseline(
         n_plot_episodes=n_plot_episodes,
         verbose=verbose,
         save_traces=save_traces,
+        baseline_night_off=baseline_night_off,
     )
 
     # Training curve plot

@@ -8,6 +8,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from stable_baselines3 import DDPG
 from stable_baselines3 import SAC
 from stable_baselines3 import TD3
+from sb3_contrib import TQC
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv, VecNormalize
@@ -261,8 +262,8 @@ class BuildingRLTrainer:
 
         self.algo_name = algo.lower()
         self.seed = seed
-        if self.algo_name not in ["sac", "td3", "ddpg"]:
-            raise ValueError(f"Unsupported algorithm: {algo}. Choose 'sac', 'td3', or 'ddpg'.")
+        if self.algo_name not in ["sac", "td3", "ddpg", "tqc"]:
+            raise ValueError(f"Unsupported algorithm: {algo}. Choose 'sac', 'td3', 'tqc', or 'ddpg'.")
 
         external_wandb_run = algo_kwargs.pop("wandb_run", None)
         if external_wandb_run is not None:
@@ -291,10 +292,14 @@ class BuildingRLTrainer:
             common_params["batch_size"] = batch_size
             common_params.setdefault("learning_starts", 5000)  # ~35 simulated days of random exploration
             AlgoClass = SAC
+        elif self.algo_name == "tqc":
+            common_params["buffer_size"] = buffer_size
+            common_params["batch_size"] = batch_size
+            common_params.setdefault("learning_starts", 5000)
+            AlgoClass = TQC
         elif self.algo_name == "td3":
             common_params["buffer_size"] = buffer_size
             common_params["batch_size"] = batch_size
-            # TD3-specific defaults
             common_params.setdefault("policy_delay", 2)
             common_params.setdefault("target_policy_noise", 0.2)
             common_params.setdefault("target_noise_clip", 0.5)
@@ -574,6 +579,8 @@ class BuildingRLTrainer:
         algo = algo.lower()
         if algo == "sac":
             self.model = SAC.load(filepath)
+        elif algo == "tqc":
+            self.model = TQC.load(filepath)
         elif algo == "td3":
             self.model = TD3.load(filepath)
         elif algo == "ddpg":

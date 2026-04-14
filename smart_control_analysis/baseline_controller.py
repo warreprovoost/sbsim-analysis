@@ -12,12 +12,14 @@ class ThermostatBaselineController:
     """
 
     def __init__(self, comfort_band_k=(294.15, 295.15), working_hours=(8.0, 18.0),
-                 night_setback_k=2.0, deadband_k=0.2, prop_band_k=2.0):
+                 night_setback_k=2.0, deadband_k=0.2, prop_band_k=2.0,
+                 night_off=False):
         self.comfort_low_k, self.comfort_high_k = comfort_band_k
         self.working_hours = working_hours
         self.night_setback_k = float(night_setback_k)
         self.deadband_k = deadband_k    # hysteresis for boiler on/off
         self.prop_band_k = prop_band_k  # reheat ramps from 0→1 over this many °C below setpoint
+        self.night_off = night_off      # if True: all actuators off at night (no heating)
         # Note: boiler turns on at comfort_low - deadband_k, reheat is full at prop_band_k below floor
         self._heating_on = False
 
@@ -44,6 +46,15 @@ class ThermostatBaselineController:
         # During working hours target midpoint; at night target just above floor (save energy)
         target_k = comfort_mid_k if is_working else comfort_low_k + 0.2
         min_temp = float(np.min(zone_temps_k))
+
+        # Night off: all actuators to -1, no heating outside working hours
+        if self.night_off and not is_working:
+            self._heating_on = False
+            action_design = getattr(env, "action_design", "reheat_per_zone")
+            if action_design == "full_per_zone":
+                return np.full(2 + 2 * n_zones, -1.0, dtype=np.float32)
+            else:
+                return np.full(3 + n_zones, -1.0, dtype=np.float32)
 
         # Boiler: on/off with deadband around target
         if min_temp < target_k - self.deadband_k:

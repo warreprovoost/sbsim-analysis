@@ -104,7 +104,7 @@ def run_rl_setup(
     energy_weight: float = 2.0,
     action_design: str = "reheat_per_zone",
     wandb_finish: bool = True,
-    train_period_start="2019-10-01",
+    train_period_start="2015-10-01",
     train_period_end="2022-03-31",
     val_period_start="2022-10-01",
     val_period_end="2023-03-24",
@@ -115,7 +115,7 @@ def run_rl_setup(
 ) -> Dict[str, Any]:
     os.makedirs(output_dir, exist_ok=True)
     algo = algo.lower()
-    if algo not in {"sac", "td3", "ddpg"}:
+    if algo not in {"sac", "td3", "ddpg", "tqc"}:
         raise ValueError(f"Unsupported algo: {algo}")
 
     if eval_training_mode is None:
