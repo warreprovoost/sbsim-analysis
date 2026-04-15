@@ -1,3 +1,4 @@
+import json
 import os
 
 import numpy as np
@@ -226,16 +227,18 @@ def run_rl_setup(
 
         # --- Periodic val evaluation: log real metrics (not normalized reward) to W&B ---
         if trainer.wandb_run is not None:
-            val_discomfort, val_cost, val_comfort_penalty = [], [], []
+            val_discomfort, val_cost, val_comfort_penalty, val_starts = [], [], [], []
             for _ in range(n_val_episodes_periodic):
                 vp = base.copy()
-                vp["start_timestamp"] = _sample_start_in_period(
+                start_ts = _sample_start_in_period(
                     rng=val_rng,
                     start=val_period_start,
                     end=val_period_end,
                     episode_days=episode_days,
                     time_zone=base["time_zone"],
-                ).isoformat()
+                )
+                vp["start_timestamp"] = start_ts.isoformat()
+                val_starts.append(start_ts.isoformat())
                 env = trainer.create_env(params=vp, factory_kwargs={"training_mode": eval_training_mode})
                 _vn = trainer.vec_normalize
                 obs, _ = env.reset()
@@ -248,10 +251,12 @@ def run_rl_setup(
                     obs, _, terminated, truncated, info = env.step(action)
                     ep_cost += float(info.get("energy_cost_usd", 0.0))
                     ep_comfort += float(info.get("comfort_penalty", 0.0))
+                    zone_temps_c = [v - 273.15 for v in env.sim.building.get_zone_average_temps().values()]
                     trace_rows.append({
-                        "room_temp_c": float(np.mean([v - 273.15 for v in env.sim.building.get_zone_average_temps().values()])),
+                        "room_temp_c": float(np.mean(zone_temps_c)),
                         "comfort_low_c": float(info.get("comfort_low_c", env.comfort_band_k[0] - 273.15)),
                         "comfort_high_c": float(info.get("comfort_high_c", env.comfort_band_k[1] - 273.15)),
+                        **{f"zone_temp_c_{i}": float(t) for i, t in enumerate(zone_temps_c)},
                     })
                     done = terminated or truncated
                 env.close()
@@ -262,9 +267,10 @@ def run_rl_setup(
                 val_comfort_penalty.append(ep_comfort)
 
             log_dict = {
-                "val/discomfort_deg_h":    float(np.mean(val_discomfort)),
-                "val/energy_cost_usd":     float(np.mean(val_cost)),
+                "val/discomfort_deg_h":     float(np.mean(val_discomfort)),
+                "val/energy_cost_usd":      float(np.mean(val_cost)),
                 "val/comfort_penalty_mean": float(np.mean(val_comfort_penalty)),
+                "val/start_timestamps":     json.dumps(val_starts),
             }
             if curriculum is not None:
                 log_dict["train/energy_weight"] = current_energy_weight
@@ -358,22 +364,39 @@ def _extract_action_channels(action: np.ndarray, action_design: str = "reheat_pe
 
 def _discomfort_degree_hours(df: pd.DataFrame, dt_sec: float) -> float:
     """
-    Compute total discomfort in degree-hours for one episode trace.
+    Compute total discomfort degree-hours for working hours only.
 
-    Uses per-step comfort_low_c / comfort_high_c columns (supports night setback).
-    Discomfort = Σ  max(T_low - T_zone, 0) + max(T_zone - T_high, 0)  ×  dt_h
+    Filters to daytime timesteps (comfort_low_c at its max = no night setback).
+    Sums violations across all individual zones so a cold zone cannot be masked
+    by a warm zone.
 
-    A value of 0 means the zone was always inside the comfort band.
-    A value of 1 means the zone was 1°C outside the band for 1 hour.
+    Discomfort = Σ_zones Σ_daytime_steps  max(T_low - T_zone, 0) + max(T_zone - T_high, 0)  ×  dt_h
     """
+    if df.empty or "comfort_low_c" not in df.columns:
+        return 0.0
+
+    # Filter to daytime only
+    day_low = df["comfort_low_c"].max()
+    df = df[df["comfort_low_c"] >= day_low - 0.01]
     if df.empty:
         return 0.0
+
     dt_h = dt_sec / 3600.0
-    t = df["room_temp_c"].to_numpy()
-    low = df["comfort_low_c"].to_numpy() if "comfort_low_c" in df.columns else np.full(len(t), np.nan)
-    high = df["comfort_high_c"].to_numpy() if "comfort_high_c" in df.columns else np.full(len(t), np.nan)
-    violation = np.maximum(low - t, 0.0) + np.maximum(t - high, 0.0)
-    return float(violation.sum() * dt_h)
+    low  = df["comfort_low_c"].to_numpy()
+    high = df["comfort_high_c"].to_numpy()
+    zone_cols = sorted([c for c in df.columns if c.startswith("zone_temp_c_")])
+
+    if zone_cols:
+        total = 0.0
+        for col in zone_cols:
+            t = df[col].to_numpy()
+            violation = np.maximum(low - t, 0.0) + np.maximum(t - high, 0.0)
+            total += float(violation.sum() * dt_h)
+        return total
+    else:
+        t = df["room_temp_c"].to_numpy()
+        violation = np.maximum(low - t, 0.0) + np.maximum(t - high, 0.0)
+        return float(violation.sum() * dt_h)
 
 
 def _run_episode_trace(
@@ -416,6 +439,7 @@ def _run_episode_trace(
             "room_temp_c":     room_temp_c,
             "room_temp_min_c": room_temp_min_c,
             "room_temp_max_c": room_temp_max_c,
+            **{f"zone_temp_c_{i}": float(t) for i, t in enumerate(zone_temps_c)},
             "outside_temp_c": outside_temp_c,
             "comfort_penalty": float(info.get("comfort_penalty", 0.0)),
             "energy_rate": float(info.get("energy_rate", 0.0)),

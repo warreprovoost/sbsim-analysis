@@ -360,15 +360,37 @@ def _compare_period_rl_vs_baseline(
             )
 
         def _comfort_stats(trace_df):
-            """Returns (pct_outside, max_deviation_c) for an episode trace."""
+            """Returns (pct_outside, max_deviation_c) for working hours only, per zone."""
             if trace_df.empty:
                 return 0.0, 0.0
-            t = trace_df["room_temp_c"].to_numpy()
-            low = trace_df["comfort_low_c"].to_numpy() if "comfort_low_c" in trace_df.columns else np.full(len(t), np.nan)
-            high = trace_df["comfort_high_c"].to_numpy() if "comfort_high_c" in trace_df.columns else np.full(len(t), np.nan)
-            violation = np.maximum(low - t, 0.0) + np.maximum(t - high, 0.0)
-            pct_outside = float((violation > 0).mean() * 100.0)
-            max_dev = float(violation.max())
+            if "comfort_low_c" not in trace_df.columns:
+                return 0.0, 0.0
+
+            # Filter to daytime (working hours) only:
+            # daytime rows have comfort_low_c at its max value (no night setback applied)
+            day_low = trace_df["comfort_low_c"].max()
+            day_mask = trace_df["comfort_low_c"] >= day_low - 0.01
+            df_day = trace_df[day_mask]
+            if df_day.empty:
+                return 0.0, 0.0
+
+            low  = df_day["comfort_low_c"].to_numpy()
+            high = df_day["comfort_high_c"].to_numpy()
+            zone_cols = sorted([c for c in df_day.columns if c.startswith("zone_temp_c_")])
+
+            if zone_cols:
+                all_violations = np.stack([
+                    np.maximum(low - df_day[col].to_numpy(), 0.0) +
+                    np.maximum(df_day[col].to_numpy() - high, 0.0)
+                    for col in zone_cols
+                ])  # shape: (n_zones, n_steps)
+                pct_outside = float((all_violations > 0).mean() * 100.0)
+                max_dev = float(all_violations.max())
+            else:
+                t = df_day["room_temp_c"].to_numpy()
+                violation = np.maximum(low - t, 0.0) + np.maximum(t - high, 0.0)
+                pct_outside = float((violation > 0).mean() * 100.0)
+                max_dev = float(violation.max())
             return pct_outside, max_dev
 
         rl_pct_outside, rl_max_dev = _comfort_stats(rl_df)

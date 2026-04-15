@@ -57,6 +57,7 @@ PRESETS = {
         #curriculum=[(0.3, 1.0), (0.7, 12.5), (1.0, 12.5)],
         description="Full training with energy penalty — 500k steps, 7-day episodes, 10min timestep",
     ),
+
     "long_eval1": dict(
         total_timesteps=100_000,
         chunk_timesteps=5_000,

@@ -420,20 +420,18 @@ class BuildingGymEnv(gym.Env):
         for _zone_id, ziv in r.zone_reward_infos.items():
             t = float(ziv.zone_air_temperature)
 
-            # Linear violation: 1°C off → penalty 1.0 (unscaled).
-            violation_deg = max(comfort_low_k - t, 0.0) + max(t - comfort_high_k, 0.0)
-            temp_violation = violation_deg  # linear, unbounded — mean over zones keeps scale reasonable
-            # Center bonus: nudges policy toward a target within the comfort band.
-            # During working hours: nudge toward band midpoint (comfort focus).
-            # At night: small nudge toward night setback floor (energy focus — let building cool).
-            # Max 0.25 — a gentle push, not a hard constraint.
             if is_working:
+                # Day: penalize both too cold and too warm, nudge toward midpoint.
+                violation_deg = max(comfort_low_k - t, 0.0) + max(t - comfort_high_k, 0.0)
                 center_bonus = 0.25 * max(0.0, 1.0 - abs(t - comfort_mid_k) / comfort_half_band)
             else:
-                # night target = setback floor (comfort_low_k already lowered by night_setback_k)
-                night_target_k = comfort_low_k + 0.5  # just above floor so band violation still possible
-                night_band_ref = max(comfort_half_band, 1.0)  # normalise over ~1°C range
-                center_bonus = 0.01 * max(0.0, 1.0 - abs(t - night_target_k) / night_band_ref)
+                # Night: only penalize overheating — let building cool freely.
+                # Small nudge toward setback floor to guide the policy downward.
+                violation_deg = max(t - comfort_high_k, 0.0)
+                night_target_k = comfort_low_k + 0.5
+                night_band_ref = max(comfort_half_band, 1.0)
+                center_bonus = 0.1 * max(0.0, 1.0 - abs(t - night_target_k) / night_band_ref)
+            temp_violation = violation_deg
 
             w = 1.0
             weighted_violation_sum += w * (temp_violation - center_bonus)
