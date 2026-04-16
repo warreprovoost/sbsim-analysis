@@ -271,6 +271,7 @@ def _compare_period_rl_vs_baseline(
     verbose: bool = True,
     save_traces: bool = False,
     baseline_night_off: bool = False,
+    algo_label: str = "RL",
 ) -> Tuple[pd.DataFrame, Dict[str, float]]:
     rng = np.random.default_rng(seed)
     rows = []
@@ -446,7 +447,7 @@ def _compare_period_rl_vs_baseline(
     _plot_comparison_boxplots(
         df,
         fig_path=os.path.join(period_dir, f"{period_name}_comparison_boxplots.png"),
-        title=f"{period_name.upper()} — RL vs Baseline",
+        title=f"{period_name.capitalize()} split — {algo_label} vs Baseline",
     )
 
     df.to_csv(os.path.join(period_dir, f"{period_name}_episode_metrics.csv"), index=False)
@@ -489,6 +490,7 @@ def compare_rl_vs_baseline(
 
     os.makedirs(output_dir, exist_ok=True)
     base = trainer.base_params.copy()
+    algo_label = type(trainer.model).__name__.upper() if trainer.model is not None else "RL"
 
     val_df, val_summary = _compare_period_rl_vs_baseline(
         trainer=trainer,
@@ -506,6 +508,7 @@ def compare_rl_vs_baseline(
         verbose=verbose,
         save_traces=save_traces,
         baseline_night_off=baseline_night_off,
+        algo_label=algo_label,
     )
     test_df, test_summary = _compare_period_rl_vs_baseline(
         trainer=trainer,
@@ -523,6 +526,7 @@ def compare_rl_vs_baseline(
         verbose=verbose,
         save_traces=save_traces,
         baseline_night_off=baseline_night_off,
+        algo_label=algo_label,
     )
 
     # Training curve plot

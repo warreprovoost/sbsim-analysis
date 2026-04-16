@@ -94,6 +94,12 @@ def main():
     )
     os.makedirs(output_dir, exist_ok=True)
 
+    # Save the exact command used to produce these results
+    cmd_path = os.path.join(output_dir, "command.txt")
+    with open(cmd_path, "w") as f:
+        f.write(" ".join(sys.argv) + "\n")
+    print(f"  Command saved to: {cmd_path}")
+
     models = _load_models(args.result_dirs, args.label, args.period, args.compare_subdir)
     if not models:
         print("ERROR: no models loaded")
@@ -132,7 +138,8 @@ def _plot_rl_boxplots(models, colors, output_dir, period):
     fig, axes = plt.subplots(1, len(available), figsize=(5 * len(available), 6))
     if len(available) == 1:
         axes = [axes]
-    fig.suptitle(f"RL Agent Comparison — {period.upper()} period",
+    algo_names = " vs ".join(dict.fromkeys(m["label"].split()[0] for m in models))
+    fig.suptitle(f"{algo_names} — {period.capitalize()} split",
                  fontsize=14, fontweight="bold")
     labels = [m["label"] for m in models]
     for ax, (col, ylabel) in zip(axes, available):
@@ -164,7 +171,7 @@ def _plot_improvement_bars(models, colors, output_dir, period):
         comfort_improve.append((bl_dis - rl_dis) / bl_dis * 100 if bl_dis > 0 else 0)
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
-    fig.suptitle(f"Improvement over Baseline — {period.upper()} period",
+    fig.suptitle(f"Improvement over Baseline — {period.capitalize()} split",
                  fontsize=14, fontweight="bold")
     x = np.arange(len(labels))
     for ax, data, ylabel, title in [
@@ -190,7 +197,8 @@ def _plot_improvement_bars(models, colors, output_dir, period):
 
 def _plot_cost_vs_comfort(models, colors, output_dir, period):
     fig, ax = plt.subplots(figsize=(8, 6))
-    ax.set_title(f"Cost vs Comfort Trade-off — {period.upper()} period",
+    algo_names = " vs ".join(dict.fromkeys(m["label"].split()[0] for m in models))
+    ax.set_title(f"{algo_names} — Cost vs Comfort, {period.capitalize()} split",
                  fontsize=13, fontweight="bold")
     for i, m in enumerate(models):
         df = m["df"]
@@ -279,8 +287,7 @@ def _plot_grouped_boxplots(groups, group_names, color_map, output_dir, period):
     fig, axes = plt.subplots(1, len(available), figsize=(5 * len(available), 6))
     if len(available) == 1:
         axes = [axes]
-    fig.suptitle(f"Algorithm Comparison — {period.upper()} period\n"
-                 f"(pooled episodes across seeds, n={len(groups[group_names[0]]['pooled'])} per group)",
+    fig.suptitle(f"{' vs '.join(group_names)} — {period.capitalize()} split",
                  fontsize=13, fontweight="bold")
 
     for ax, (col, ylabel) in zip(axes, available):
@@ -319,33 +326,39 @@ def _plot_grouped_boxplots(groups, group_names, color_map, output_dir, period):
 
 def _plot_grouped_cost_vs_comfort(groups, group_names, color_map, output_dir, period):
     fig, ax = plt.subplots(figsize=(8, 6))
-    ax.set_title(f"Cost vs Comfort — {period.upper()} period", fontsize=13, fontweight="bold")
+    ax.set_title(f"{' vs '.join(group_names)} — Cost vs Comfort, {period.capitalize()} split",
+                 fontsize=13, fontweight="bold")
 
     for g in group_names:
-        pooled = groups[g]["pooled"]
         members = groups[g]["members"]
-        # Group centroid = mean of seed means
+        # Per-seed means
         cost_means = [m["df"]["rl_energy_cost_usd"].mean() for m in members]
         dis_means  = [m["df"]["rl_discomfort_deg_h"].mean() for m in members]
         cx, cy = np.mean(cost_means), np.mean(dis_means)
         ex, ey = np.std(cost_means), np.std(dis_means)
 
-        ax.errorbar(cx, cy, xerr=ex, yerr=ey,
-                    fmt="o", color=color_map[g], markersize=12,
-                    capsize=6, label=g, zorder=4)
-        # Individual seed dots
+        # Individual seed points
         ax.scatter(cost_means, dis_means, color=color_map[g],
-                   s=30, alpha=0.5, zorder=5)
+                   s=50, alpha=0.6, zorder=5, marker="o",
+                   edgecolors="white", linewidths=0.5)
+
+        # Group mean with std error bars
+        ax.errorbar(cx, cy, xerr=ex, yerr=ey,
+                    fmt="o", color=color_map[g], markersize=9,
+                    capsize=5, capthick=1.5, linewidth=1.5,
+                    markeredgecolor="black", markeredgewidth=0.8,
+                    label=g, zorder=6)
 
     # Baseline
     pooled0 = groups[group_names[0]]["pooled"]
     bl_cost = pooled0["baseline_energy_cost_usd"].mean()
     bl_dis  = pooled0["baseline_discomfort_deg_h"].mean()
-    ax.plot(bl_cost, bl_dis, "kX", markersize=14, label="Baseline", zorder=6)
+    ax.plot(bl_cost, bl_dis, "kX", markersize=10, markeredgewidth=2,
+            label="Baseline", zorder=7)
 
     ax.set_xlabel("Energy cost (USD / episode)")
     ax.set_ylabel("Discomfort (°C·h / episode)")
-    ax.legend()
+    ax.legend(fontsize=9, framealpha=0.9)
     ax.grid(alpha=0.3)
     plt.tight_layout()
     path = os.path.join(output_dir, f"{period}_grouped_cost_vs_comfort.png")

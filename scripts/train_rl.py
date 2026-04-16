@@ -45,7 +45,7 @@ PRESETS = {
         description="Quick smoke test — 5k steps, full, 3-day episodes",
     ),
     "long": dict(
-        total_timesteps=500_000,
+        total_timesteps=750_000,
         chunk_timesteps=30_000,   # ~20 episodes per chunk → 25 different start dates per 500k steps
         episode_days=7,
         n_eval_episodes=30,
@@ -278,6 +278,11 @@ def main():
                 },
             )
             print(f"W&B run: {wandb_run.url}")
+            # Save run ID so plot_convergence.py can look it up later
+            run_config["wandb_run_id"] = wandb_run.id
+            run_config["wandb_run_name"] = wandb_run.name
+            with open(os.path.join(output_dir, "run_config.json"), "w") as f:
+                json.dump(run_config, f, indent=2)
         except Exception as e:
             print(f"W&B init failed (continuing without it): {e}")
             wandb_run = None
