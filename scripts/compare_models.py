@@ -84,6 +84,8 @@ def main():
     parser.add_argument("--label", nargs="*", default=None, help="Custom label per dir")
     parser.add_argument("--group", nargs="*", default=None,
                         help="Group name per dir (e.g. SAC SAC SAC TQC TQC TQC)")
+    parser.add_argument("--vs_baseline", action="store_true",
+                        help="Pool all dirs as one algorithm group and compare against baseline")
     parser.add_argument("--compare_subdir", default="compare_reeval")
     args = parser.parse_args()
 
@@ -105,7 +107,10 @@ def main():
         print("ERROR: no models loaded")
         sys.exit(1)
 
-    if args.group:
+    if args.vs_baseline:
+        algo = models[0]["config"].get("algo", "RL").upper()
+        _vs_baseline_comparison(models, algo, output_dir, args.period)
+    elif args.group:
         # Attach group to each model
         for i, m in enumerate(models):
             m["group"] = args.group[i] if i < len(args.group) else m["label"]
@@ -246,6 +251,83 @@ def _print_summary_table(models, output_dir, period):
     print(f"\n{'='*80}\n  SUMMARY — {period.upper()} period\n{'='*80}")
     print(summary_df.to_string(index=False))
     path = os.path.join(output_dir, f"{period}_summary_table.csv")
+    summary_df.to_csv(path, index=False)
+    print(f"\n  Saved: {path}")
+
+
+# ── Single algorithm vs Baseline (pool seeds, Mann-Whitney vs baseline) ──────
+
+def _vs_baseline_comparison(models, algo, output_dir, period):
+    pooled = pd.concat([m["df"] for m in models], ignore_index=True)
+    n_seeds = len(models)
+    n_eps = len(pooled)
+
+    rl_color, bl_color = "#4c9be8", "#f4a261"
+
+    # --- Boxplots: RL vs Baseline side by side for each metric ---
+    BL_METRICS = [
+        ("rl_energy_cost_usd",     "baseline_energy_cost_usd",     "Energy cost (USD/ep)"),
+        ("rl_discomfort_deg_h",    "baseline_discomfort_deg_h",    "Discomfort (°C·h/ep)"),
+        ("rl_pct_outside_comfort", "baseline_pct_outside_comfort", "Outside comfort (%)"),
+        ("rl_max_temp_deviation_c","baseline_max_temp_deviation_c","Max deviation (°C)"),
+    ]
+    available = [(rc, bc, lbl) for rc, bc, lbl in BL_METRICS
+                 if rc in pooled.columns and bc in pooled.columns]
+
+    if available:
+        fig, axes = plt.subplots(1, len(available), figsize=(5 * len(available), 6))
+        if len(available) == 1:
+            axes = [axes]
+        fig.suptitle(f"{algo} vs Baseline — {period.capitalize()} split"
+                     f"  ({n_seeds} seeds, {n_eps} episodes pooled)",
+                     fontsize=13, fontweight="bold")
+        for ax, (rl_col, bl_col, ylabel) in zip(axes, available):
+            rl_data = pooled[rl_col].dropna().to_numpy()
+            bl_data = pooled[bl_col].dropna().to_numpy()
+            bp = ax.boxplot([rl_data, bl_data], labels=[algo, "Baseline"],
+                            patch_artist=True, widths=0.6)
+            bp["boxes"][0].set_facecolor(rl_color);  bp["boxes"][0].set_alpha(0.8)
+            bp["boxes"][1].set_facecolor(bl_color);  bp["boxes"][1].set_alpha(0.8)
+            # Mann-Whitney U test
+            stat, pval = stats.mannwhitneyu(rl_data, bl_data, alternative="two-sided")
+            sig = "***" if pval < 0.001 else "**" if pval < 0.01 else "*" if pval < 0.05 else "ns"
+            ax.set_title(f"p={pval:.3f} {sig}", fontsize=9)
+            ax.set_ylabel(ylabel)
+            ax.grid(axis="y", alpha=0.3)
+            # Seed mean diamonds
+            for j, means in enumerate([[m["df"][rl_col].mean() for m in models],
+                                        [m["df"][bl_col].mean() for m in models]]):
+                ax.scatter([j + 1] * len(means), means, color="black",
+                           zorder=5, s=40, marker="D")
+        axes[0].scatter([], [], color="black", s=40, marker="D", label="Seed mean")
+        axes[0].legend(fontsize=8)
+        plt.tight_layout()
+        path = os.path.join(output_dir, f"{period}_vs_baseline_boxplots.png")
+        plt.savefig(path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        print(f"  Saved: {path}")
+
+    # --- Summary table ---
+    print(f"\n{'='*70}\n  {algo} vs BASELINE — {period.upper()} split\n{'='*70}")
+    rows = []
+    for rc, bc, lbl in BL_METRICS:
+        if rc not in pooled.columns or bc not in pooled.columns:
+            continue
+        rl_mean = np.mean([m["df"][rc].mean() for m in models])
+        rl_std  = np.std( [m["df"][rc].mean() for m in models])
+        bl_mean = pooled[bc].mean()
+        delta   = (bl_mean - rl_mean) / bl_mean * 100 if bl_mean > 0 else float("nan")
+        stat, pval = stats.mannwhitneyu(pooled[rc].dropna(), pooled[bc].dropna(),
+                                        alternative="two-sided")
+        sig = "***" if pval < 0.001 else "**" if pval < 0.01 else "*" if pval < 0.05 else "ns"
+        rows.append({"Metric": lbl,
+                     f"{algo} (mean±std)": f"{rl_mean:.3f} ± {rl_std:.3f}",
+                     "Baseline (mean)": f"{bl_mean:.3f}",
+                     "Δ (%)": f"{delta:+.1f}",
+                     "p-value": f"{pval:.4f} {sig}"})
+    summary_df = pd.DataFrame(rows)
+    print(summary_df.to_string(index=False))
+    path = os.path.join(output_dir, f"{period}_vs_baseline_summary.csv")
     summary_df.to_csv(path, index=False)
     print(f"\n  Saved: {path}")
 

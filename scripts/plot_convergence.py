@@ -114,10 +114,22 @@ def _fetch_wandb_history(wandb_project: str, run_id: str) -> pd.DataFrame:
 
 # ── per-run convergence ───────────────────────────────────────────────────────
 
-def _compute_convergence(result_dir: str, wandb_project: str, run_id: str,
-                         cache_dir: str) -> pd.DataFrame | None:
-    """Return df with columns: step, ratio (rl/baseline), rolling_min_ratio."""
+def _baseline_cache_key(timestamps: list[str]) -> str:
+    """Stable cache key based on the sorted episode start timestamps."""
+    import hashlib
+    key = ",".join(sorted(timestamps))
+    return hashlib.md5(key.encode()).hexdigest()[:12]
 
+
+def _compute_convergence(result_dir: str, wandb_project: str, run_id: str,
+                         cache_dir: str,
+                         baseline_cache: dict) -> pd.DataFrame | None:
+    """Return df with columns: step, cost_ratio, dis_ratio, ema_*.
+
+    baseline_cache is a shared dict {cache_key: (bl_cost_mean, bl_dis_mean)}
+    so identical timestamp sets across runs are only simulated once.
+    """
+    os.makedirs(cache_dir, exist_ok=True)
     cache_path = os.path.join(cache_dir, f"{run_id.replace('/', '_')}_convergence.csv")
     if os.path.exists(cache_path):
         print(f"    [cache] {cache_path}")
@@ -154,12 +166,20 @@ def _compute_convergence(result_dir: str, wandb_project: str, run_id: str,
         rl_discomfort = float(row.get("val/discomfort_deg_h", np.nan))
         timestamps = json.loads(row["val/start_timestamps"])
 
-        print(f"    step={step}: running baseline on {len(timestamps)} episodes ...")
-        bl_costs, bl_discomforts = _baseline_metrics_for_timestamps(
-            timestamps, base, episode_days, training_mode
-        )
-        bl_cost_mean = float(np.mean(bl_costs))
-        bl_dis_mean  = float(np.mean(bl_discomforts))
+        # Use shared baseline cache to avoid recomputing identical episode windows
+        bkey = _baseline_cache_key(timestamps)
+        if bkey in baseline_cache:
+            bl_cost_mean, bl_dis_mean = baseline_cache[bkey]
+            print(f"    step={step}: baseline from shared cache (key={bkey})")
+        else:
+            print(f"    step={step}: running baseline on {len(timestamps)} episodes ...")
+            bl_costs, bl_discomforts = _baseline_metrics_for_timestamps(
+                timestamps, base, episode_days, training_mode
+            )
+            bl_cost_mean = float(np.mean(bl_costs))
+            bl_dis_mean  = float(np.mean(bl_discomforts))
+            baseline_cache[bkey] = (bl_cost_mean, bl_dis_mean)
+
         cost_ratio = rl_cost / bl_cost_mean if bl_cost_mean > 0 else np.nan
         dis_ratio  = rl_discomfort / bl_dis_mean if bl_dis_mean > 0 else np.nan
         rows.append({"step": step,
@@ -171,7 +191,6 @@ def _compute_convergence(result_dir: str, wandb_project: str, run_id: str,
     df["ema_cost_ratio"] = df["cost_ratio"].ewm(span=5, adjust=False).mean()
     df["ema_dis_ratio"]  = df["dis_ratio"].ewm(span=5, adjust=False).mean()
 
-    os.makedirs(cache_dir, exist_ok=True)
     df.to_csv(cache_path, index=False)
     print(f"    Cached to: {cache_path}")
     return df
@@ -319,10 +338,11 @@ def main():
                   f"Supply --run_ids or add wandb_run_id to run_config.json.")
             sys.exit(1)
 
+        baseline_cache = {}  # shared across all runs: {timestamp_hash: (bl_cost, bl_dis)}
         all_runs = []
         for rdir, run_id, group in zip(args.runs, run_ids, groups):
             print(f"\nProcessing: {rdir}  (group={group}, run_id={run_id})")
-            df = _compute_convergence(rdir, args.wandb_project, run_id, cache_dir)
+            df = _compute_convergence(rdir, args.wandb_project, run_id, cache_dir, baseline_cache)
             all_runs.append({"dir": rdir, "group": group, "run_id": run_id, "df": df})
 
     _plot_convergence(all_runs, group_names, color_map, output_dir)
