@@ -6,9 +6,10 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from stable_baselines3 import DDPG
+from stable_baselines3 import PPO
 from stable_baselines3 import SAC
 from stable_baselines3 import TD3
-from sb3_contrib import TQC
+from sb3_contrib import CrossQ, TQC
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv, VecNormalize
@@ -262,8 +263,8 @@ class BuildingRLTrainer:
 
         self.algo_name = algo.lower()
         self.seed = seed
-        if self.algo_name not in ["sac", "td3", "ddpg", "tqc"]:
-            raise ValueError(f"Unsupported algorithm: {algo}. Choose 'sac', 'td3', 'tqc', or 'ddpg'.")
+        if self.algo_name not in ["sac", "td3", "ddpg", "tqc", "ppo", "crossq"]:
+            raise ValueError(f"Unsupported algorithm: {algo}. Choose 'sac', 'td3', 'tqc', 'ddpg', 'ppo', or 'crossq'.")
 
         external_wandb_run = algo_kwargs.pop("wandb_run", None)
         if external_wandb_run is not None:
@@ -304,6 +305,22 @@ class BuildingRLTrainer:
             common_params.setdefault("target_policy_noise", 0.2)
             common_params.setdefault("target_noise_clip", 0.5)
             AlgoClass = TD3
+        elif self.algo_name == "crossq":
+            common_params["buffer_size"] = buffer_size
+            common_params["batch_size"] = batch_size
+            common_params.setdefault("learning_starts", 5000)
+            algo_kwargs.pop("policy_kwargs", None)  # use CrossQ default: pi=[256,256], qf=[1024,1024]
+            AlgoClass = CrossQ
+        elif self.algo_name == "ppo":
+            # PPO is on-policy: no replay buffer; explores via stochastic Gaussian policy
+            common_params.setdefault("n_steps", 1024)   # ~1 episode (7d × 24h × 6 steps/h = 1008 steps)
+            common_params.setdefault("batch_size", 512) # must divide n_steps; 1024/512 = 2 minibatches
+            common_params.setdefault("n_epochs", 10)    # gradient passes per rollout
+            common_params.setdefault("gamma", 0.99)
+            common_params.setdefault("gae_lambda", 0.95)
+            common_params.setdefault("ent_coef", 0.01)  # small entropy bonus to keep exploration alive
+            common_params.setdefault("clip_range", 0.2)
+            AlgoClass = PPO
         else:  # ddpg
             common_params["buffer_size"] = buffer_size
             common_params["batch_size"] = batch_size
@@ -585,6 +602,10 @@ class BuildingRLTrainer:
             self.model = TD3.load(filepath)
         elif algo == "ddpg":
             self.model = DDPG.load(filepath)
+        elif algo == "ppo":
+            self.model = PPO.load(filepath)
+        elif algo == "crossq":
+            self.model = CrossQ.load(filepath)
         else:
             raise ValueError(f"Unknown algo: {algo}")
         self.algo_name = algo

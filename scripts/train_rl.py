@@ -138,7 +138,7 @@ def parse_args():
     )
     parser.add_argument(
         "--algo",
-        choices=["sac", "td3", "tqc"],
+        choices=["sac", "td3", "tqc", "ppo", "ddpg", "crossq"],
         default="sac",
         help="RL algorithm.",
     )
@@ -189,6 +189,12 @@ def parse_args():
         choices=["reheat_per_zone", "damper_per_zone", "full_per_zone"],
         default="reheat_per_zone",
         help="Action space design: reheat_per_zone (cold), damper_per_zone (warm), full_per_zone (both).",
+    )
+    parser.add_argument(
+        "--total_timesteps",
+        type=int,
+        default=None,
+        help="Override preset total_timesteps.",
     )
     parser.add_argument(
         "--no_compare",
@@ -242,6 +248,7 @@ def main():
         "output_dir":   output_dir,
         "wandb_project": args.wandb_project,
         **{k: v for k, v in preset.items() if k != "description"},
+        "total_timesteps": args.total_timesteps or preset["total_timesteps"],
         "description":  preset["description"],
         "started_at":   datetime.datetime.now().isoformat(),
     }
@@ -297,7 +304,7 @@ def main():
     res = run_rl_setup(
         weather_csv_path=weather_csv,
         algo=args.algo,
-        total_timesteps=preset["total_timesteps"],
+        total_timesteps=args.total_timesteps or preset["total_timesteps"],
         chunk_timesteps=preset["chunk_timesteps"],
         episode_days=preset["episode_days"],
         seed=args.seed,

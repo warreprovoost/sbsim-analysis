@@ -116,7 +116,7 @@ def run_rl_setup(
 ) -> Dict[str, Any]:
     os.makedirs(output_dir, exist_ok=True)
     algo = algo.lower()
-    if algo not in {"sac", "td3", "ddpg", "tqc"}:
+    if algo not in {"sac", "td3", "ddpg", "tqc", "ppo", "crossq"}:
         raise ValueError(f"Unsupported algo: {algo}")
 
     if eval_training_mode is None:
@@ -274,7 +274,7 @@ def run_rl_setup(
             }
             if curriculum is not None:
                 log_dict["train/energy_weight"] = current_energy_weight
-            trainer.wandb_run.log(log_dict, step=trained)
+            trainer.wandb_run.log(log_dict, step=trainer.model.num_timesteps)
 
     trainer.save_model(os.path.join(output_dir, f"{algo}_2024_model"))
     trainer.save_results(output_dir)

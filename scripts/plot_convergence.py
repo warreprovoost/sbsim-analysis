@@ -38,6 +38,10 @@ from smart_control_analysis.baseline_controller import ThermostatBaselineControl
 from smart_control_analysis.eval_plotter import _run_episode_trace
 
 
+BASELINE_CACHE_PATH = os.path.join(
+    os.path.dirname(__file__), "..", "results", ".baseline_cache.json"
+)
+
 # ── helpers ──────────────────────────────────────────────────────────────────
 
 def _build_base_params(run_config: dict) -> dict:
@@ -113,6 +117,21 @@ def _fetch_wandb_history(wandb_project: str, run_id: str) -> pd.DataFrame:
 
 
 # ── per-run convergence ───────────────────────────────────────────────────────
+
+def _load_baseline_cache() -> dict:
+    if os.path.exists(BASELINE_CACHE_PATH):
+        with open(BASELINE_CACHE_PATH) as f:
+            raw = json.load(f)
+        # stored as {key: [cost, dis]}, convert back to tuples
+        return {k: tuple(v) for k, v in raw.items()}
+    return {}
+
+
+def _save_baseline_cache(cache: dict) -> None:
+    os.makedirs(os.path.dirname(BASELINE_CACHE_PATH), exist_ok=True)
+    with open(BASELINE_CACHE_PATH, "w") as f:
+        json.dump({k: list(v) for k, v in cache.items()}, f)
+
 
 def _baseline_cache_key(timestamps: list[str]) -> str:
     """Stable cache key based on the sorted episode start timestamps."""
@@ -240,8 +259,8 @@ def _plot_convergence(all_runs: list[dict], group_names: list[str],
             # Subtle shading below 1 to highlight the better-than-baseline region
             ax.axhspan(0, 1.0, alpha=0.04, color="green", zorder=0)
             # Custom y-tick labels: 0.5, 0.75, 1, 10 instead of 10^0, 10^1 etc.
-            ax.set_yticks([0.5, 0.75, 1.0, 2.0, 5.0, 10.0])
-            ax.set_yticklabels(["0.5", "0.75", "1", "2", "5", "10"])
+            ax.set_yticks([0.25, 0.5, 0.75, 1.0, 2.0, 5.0, 10.0])
+            ax.set_yticklabels(["0.25","0.5", "0.75", "1", "2", "5", "10"])
         ax.legend(fontsize=9)
 
     plt.tight_layout()
@@ -338,12 +357,15 @@ def main():
                   f"Supply --run_ids or add wandb_run_id to run_config.json.")
             sys.exit(1)
 
-        baseline_cache = {}  # shared across all runs: {timestamp_hash: (bl_cost, bl_dis)}
+        baseline_cache = _load_baseline_cache()
+        print(f"  Loaded {len(baseline_cache)} baseline cache entries from {BASELINE_CACHE_PATH}")
         all_runs = []
         for rdir, run_id, group in zip(args.runs, run_ids, groups):
             print(f"\nProcessing: {rdir}  (group={group}, run_id={run_id})")
             df = _compute_convergence(rdir, args.wandb_project, run_id, cache_dir, baseline_cache)
             all_runs.append({"dir": rdir, "group": group, "run_id": run_id, "df": df})
+        _save_baseline_cache(baseline_cache)
+        print(f"  Saved {len(baseline_cache)} baseline cache entries to {BASELINE_CACHE_PATH}")
 
     _plot_convergence(all_runs, group_names, color_map, output_dir)
     print(f"\nDone. Output: {output_dir}")

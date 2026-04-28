@@ -26,10 +26,12 @@ SEED=${SEED:-42}
 WEIGHT=${WEIGHT:-2.0}
 ACTION_DESIGN=${ACTION_DESIGN:-reheat_per_zone}
 ALGO=${ALGO:-sac}
+FLOORPLAN=${FLOORPLAN:-office_4room}
+TOTAL_TIMESTEPS=${TOTAL_TIMESTEPS:-}
 
 IS_RESUBMIT=${IS_RESUBMIT:-0}
 # Print params in a parseable format so check_jobs.sh can resubmit if cancelled
-echo "JOB_PARAMS: ALGO=${ALGO} WEIGHT=${WEIGHT} SEED=${SEED} ACTION_DESIGN=${ACTION_DESIGN} IS_RESUBMIT=${IS_RESUBMIT}"
+echo "JOB_PARAMS: ALGO=${ALGO} WEIGHT=${WEIGHT} SEED=${SEED} ACTION_DESIGN=${ACTION_DESIGN} FLOORPLAN=${FLOORPLAN} IS_RESUBMIT=${IS_RESUBMIT}"
 
 # Check if GPU is already heavily used (shared node with another job)
 gpu_util=$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d ' ')
@@ -40,10 +42,11 @@ else
 fi
 ~/.conda/envs/sbsim/bin/python scripts/train_rl.py \
     --mode long --algo ${ALGO} --seed ${SEED} \
-    --floorplan office_4room \
+    --floorplan ${FLOORPLAN} \
     --energy_weight ${WEIGHT} \
     --action_design ${ACTION_DESIGN} \
     --unique_run \
     --weather_csv /user/gent/453/vsc45342/thesis/weather_data/belgium_weather_multiyear.csv \
+    ${TOTAL_TIMESTEPS:+--total_timesteps ${TOTAL_TIMESTEPS}} \
 
 echo "Job completed successfully"
