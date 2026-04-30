@@ -1,5 +1,7 @@
 import json
 import os
+import torch
+torch.cuda.is_available()  # force CUDA initialization before any SB3 model loading
 
 import numpy as np
 import pandas as pd
@@ -112,6 +114,7 @@ def run_rl_setup(
     test_period_start="2023-12-01",
     test_period_end="2024-03-24",
     curriculum: Optional[List[Tuple[float, float]]] = None,
+    resume_from: Optional[str] = None,
     **train_kwargs,
 ) -> Dict[str, Any]:
     os.makedirs(output_dir, exist_ok=True)
@@ -161,6 +164,35 @@ def run_rl_setup(
         curriculum = sorted(curriculum, key=lambda x: x[0])
         current_energy_weight = curriculum[0][1]
         print(f"Curriculum: {[(f'{frac:.0%}', ew) for frac, ew in curriculum]}")
+
+    # Resume from existing model if requested
+    if resume_from is not None:
+        from stable_baselines3.common.vec_env import VecNormalize as _VecNormalize
+        # Accept either a result dir or a direct model file path
+        if os.path.isdir(resume_from):
+            model_path = os.path.join(resume_from, f"{algo}_2024_model")
+        else:
+            model_path = resume_from
+        norm_path = model_path + "_vecnormalize.pkl"
+        print(f"Resuming from: {model_path}")
+        # Load model BEFORE creating vec env — DummyVecEnv workers run in-process and
+        # set CUDA_VISIBLE_DEVICES="" which would hide the GPU from subsequent model loading
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        trainer.load_model(model_path, algo, device=device)
+        # Create a fresh vec env, then restore normalization stats into it
+        init_env = trainer.create_vec_env(n_envs=n_envs, params=base, training_mode=training_mode)
+        if os.path.exists(norm_path):
+            # Replace the freshly-created VecNormalize with one whose running stats are restored
+            init_env = _VecNormalize.load(norm_path, init_env.venv)
+            init_env.training = True
+            print(f"VecNormalize stats restored from {norm_path}")
+        trainer.env = init_env
+        trainer.vec_normalize = init_env if isinstance(init_env, _VecNormalize) else None
+        trainer.model.set_env(init_env)
+        # Initialize callback so subsequent chunks can use it
+        from smart_control_analysis.rl_trainer import TrainingProgressCallback
+        trainer.callback = TrainingProgressCallback()
+        first_chunk = False
 
     while trained < total_timesteps:
         # Update energy weight based on curriculum schedule (linear interpolation)

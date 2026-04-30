@@ -33,9 +33,6 @@ import pandas as pd
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from smart_control_analysis.building_factory import building_factory, get_base_params
-from smart_control_analysis.rl_trainer import BuildingRLTrainer
-from smart_control_analysis.baseline_controller import ThermostatBaselineController
-from smart_control_analysis.eval_plotter import _run_episode_trace
 
 
 BASELINE_CACHE_PATH = os.path.join(
@@ -68,6 +65,9 @@ def _baseline_metrics_for_timestamps(
 
     Returns (costs, discomforts) — one value per timestamp.
     """
+    from smart_control_analysis.rl_trainer import BuildingRLTrainer
+    from smart_control_analysis.baseline_controller import ThermostatBaselineController
+    from smart_control_analysis.eval_plotter import _run_episode_trace
     costs, discomforts = [], []
     for ts_str in timestamps:
         p = base.copy()
@@ -246,11 +246,12 @@ def _plot_convergence(all_runs: list[dict], group_names: list[str],
                 interped = [s.asof(st) if st >= s.index.min() else np.nan for st in all_steps]
                 interp_vals.append(interped)
             arr = np.array(interp_vals, dtype=float)
-            mean = np.nanmean(arr, axis=0)
-            std  = np.nanstd(arr,  axis=0)
+            median = np.nanmedian(arr, axis=0)
+            lo = np.nanmin(arr, axis=0)
+            hi = np.nanmax(arr, axis=0)
             color = color_map[g]
-            ax.plot(all_steps, mean, color=color, linewidth=2.0, label=g, zorder=3)
-            ax.fill_between(all_steps, mean - std, mean + std, color=color, alpha=0.2)
+            ax.plot(all_steps, median, color=color, linewidth=2.0, label=g, zorder=3)
+            ax.fill_between(all_steps, lo, hi, color=color, alpha=0.2)
 
         if symlog:
             # Linear between 0 and 1 (where differences matter), log above 1
@@ -259,8 +260,8 @@ def _plot_convergence(all_runs: list[dict], group_names: list[str],
             # Subtle shading below 1 to highlight the better-than-baseline region
             ax.axhspan(0, 1.0, alpha=0.04, color="green", zorder=0)
             # Custom y-tick labels: 0.5, 0.75, 1, 10 instead of 10^0, 10^1 etc.
-            ax.set_yticks([0.25, 0.5, 0.75, 1.0, 2.0, 5.0, 10.0])
-            ax.set_yticklabels(["0.25","0.5", "0.75", "1", "2", "5", "10"])
+            ax.set_yticks([0, 0.25, 0.5, 0.75, 1.0, 2.0, 5.0, 10.0])
+            ax.set_yticklabels(["0","0.25","0.5", "0.75", "1", "2", "5", "10"])
         ax.legend(fontsize=9)
 
     plt.tight_layout()

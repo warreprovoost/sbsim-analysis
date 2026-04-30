@@ -8,12 +8,11 @@
 #SBATCH --mail-type=BEGIN,END,FAIL
 
 ml purge
-ml GCCcore/12.3.0
-ml Python-bundle-PyPI/2023.06-GCCcore-12.3.0
-ml PyTorch/2.1.2-foss-2023a-CUDA-12.1.1
+ml PyTorch/2.1.2-foss-2023a
 
-export PYTHONPATH="/user/gent/453/vsc45342/.conda/envs/sbsim/lib/python3.11/site-packages:/apps/gent/RHEL9/cascadelake-ampere-ib/software/PyTorch/2.1.2-foss-2023a-CUDA-12.1.1/lib/python3.11/site-packages"
-export LD_LIBRARY_PATH=/apps/gent/RHEL9/cascadelake-ib/software/GCCcore/12.3.0/lib64:$LD_LIBRARY_PATH
+export OMP_NUM_THREADS=4
+export MKL_NUM_THREADS=4
+export OPENBLAS_NUM_THREADS=4
 
 eval "$(conda shell.bash hook)"
 conda activate sbsim
@@ -36,13 +35,6 @@ IS_RESUBMIT=${IS_RESUBMIT:-0}
 # Print params in a parseable format so check_jobs.sh can resubmit if cancelled
 echo "JOB_PARAMS: ALGO=${ALGO} WEIGHT=${WEIGHT} SEED=${SEED} ACTION_DESIGN=${ACTION_DESIGN} FLOORPLAN=${FLOORPLAN} IS_RESUBMIT=${IS_RESUBMIT}"
 
-# Check if GPU is already heavily used (shared node with another job)
-gpu_util=$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d ' ')
-if [ -n "$gpu_util" ] && [ "$gpu_util" -gt 20 ]; then
-    echo "GPU_SHARING: GPU already at ${gpu_util}% utilization — check_jobs.sh will cancel and resubmit"
-else
-    echo "GPU_SHARING: GPU at ${gpu_util:-?}% utilization, proceeding"
-fi
 ~/.conda/envs/sbsim/bin/python scripts/train_rl.py \
     --mode long --algo ${ALGO} --seed ${SEED} \
     --floorplan ${FLOORPLAN} \

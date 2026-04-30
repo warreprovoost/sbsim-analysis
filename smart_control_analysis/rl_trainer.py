@@ -591,21 +591,21 @@ class BuildingRLTrainer:
             print(f"VecNormalize stats saved to {norm_path}")
         print(f"Model saved to {filepath}")
 
-    def load_model(self, filepath: str, algo: str):
+    def load_model(self, filepath: str, algo: str, device: str = "auto"):
         """Load trained model."""
         algo = algo.lower()
         if algo == "sac":
-            self.model = SAC.load(filepath)
+            self.model = SAC.load(filepath, device=device)
         elif algo == "tqc":
-            self.model = TQC.load(filepath)
+            self.model = TQC.load(filepath, device=device)
         elif algo == "td3":
-            self.model = TD3.load(filepath)
+            self.model = TD3.load(filepath, device=device)
         elif algo == "ddpg":
-            self.model = DDPG.load(filepath)
+            self.model = DDPG.load(filepath, device=device)
         elif algo == "ppo":
-            self.model = PPO.load(filepath)
+            self.model = PPO.load(filepath, device=device)
         elif algo == "crossq":
-            self.model = CrossQ.load(filepath)
+            self.model = CrossQ.load(filepath, device=device)
         else:
             raise ValueError(f"Unknown algo: {algo}")
         self.algo_name = algo

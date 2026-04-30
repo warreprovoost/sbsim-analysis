@@ -197,6 +197,20 @@ def parse_args():
         help="Override preset total_timesteps.",
     )
     parser.add_argument(
+        "--resume_from",
+        type=str,
+        default=None,
+        help="Path to a result dir (or model file) to resume training from. "
+             "The model and VecNormalize stats are loaded; training continues for total_timesteps more steps.",
+    )
+    parser.add_argument(
+        "--resume_wandb_id",
+        type=str,
+        default=None,
+        help="W&B run ID to resume logging into (e.g. from run_config.json of the original run). "
+             "If not set but --resume_from is given, auto-read from the original run_config.json.",
+    )
+    parser.add_argument(
         "--no_compare",
         action="store_true",
         help="Skip RL vs baseline comparison after training.",
@@ -220,6 +234,8 @@ def parse_args():
 def main():
     args = parse_args()
     preset = PRESETS[args.mode]
+    if args.resume_from:
+        args.resume_from = os.path.expanduser(args.resume_from)
 
     weather_csv = os.path.expanduser(args.weather_csv)
 
@@ -269,13 +285,29 @@ def main():
     print("=" * 60)
 
     # ── W&B ──
+    # Auto-detect wandb_run_id from the original run_config.json if resuming
+    resume_wandb_id = args.resume_wandb_id
+    if resume_wandb_id is None and args.resume_from:
+        orig_config = os.path.join(
+            args.resume_from if os.path.isdir(args.resume_from) else os.path.dirname(args.resume_from),
+            "run_config.json",
+        )
+        if os.path.exists(orig_config):
+            with open(orig_config) as f:
+                _orig = json.load(f)
+            resume_wandb_id = _orig.get("wandb_run_id")
+            if resume_wandb_id:
+                print(f"Auto-detected W&B run ID to resume: {resume_wandb_id}")
+
     wandb_run = None
     if args.wandb_project:
         try:
             import wandb
             wandb_run = wandb.init(
                 project=args.wandb_project,
-                name=f"{args.mode}_{args.algo}_seed{args.seed}",
+                id=resume_wandb_id,
+                resume="must" if resume_wandb_id else None,
+                name=f"{args.mode}_{args.algo}_seed{args.seed}" if not resume_wandb_id else None,
                 tags=[args.mode, args.algo, f"seed{args.seed}"],
                 config={
                     "mode": args.mode,
@@ -320,6 +352,7 @@ def main():
         wandb_finish=False,  # keep run alive for compare logging
         train_period_end="2023-03-31",  # include 2022-2023 winter (val period no longer used)
         curriculum=preset.get("curriculum"),
+        resume_from=args.resume_from,
         **_extra_train_kwargs,
     )
 
