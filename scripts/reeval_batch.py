@@ -20,7 +20,8 @@ from smart_control_analysis.eval_plotter import compare_rl_vs_baseline, _compare
 
 
 def reeval_one(result_dir, seed, episode_days_override, training_mode_override,
-               no_val, val_only, test_start, test_end, val_start, val_end, n_episodes):
+               no_val, val_only, test_start, test_end, val_start, val_end, n_episodes,
+               baseline_cache=None):
     config_path = os.path.join(result_dir, "run_config.json")
     if not os.path.exists(config_path):
         print(f"  ERROR: no run_config.json in {result_dir}, skipping")
@@ -83,6 +84,7 @@ def reeval_one(result_dir, seed, episode_days_override, training_mode_override,
             training_mode=training_mode,
             n_plot_episodes=0,
             verbose=True,
+            baseline_cache=baseline_cache,
         )
     elif no_val:
         _compare_period_rl_vs_baseline(
@@ -99,6 +101,7 @@ def reeval_one(result_dir, seed, episode_days_override, training_mode_override,
             training_mode=training_mode,
             n_plot_episodes=0,
             verbose=True,
+            baseline_cache=baseline_cache,
         )
     else:
         compare_rl_vs_baseline(
@@ -115,6 +118,7 @@ def reeval_one(result_dir, seed, episode_days_override, training_mode_override,
             val_period_end=val_end,
             test_period_start=test_start,
             test_period_end=test_end,
+            baseline_cache=baseline_cache,
         )
 
     print(f"  Saved to: {output_dir}")
@@ -135,6 +139,10 @@ def main():
     parser.add_argument("--test_end", default="2024-03-24")
     args = parser.parse_args()
 
+    # Shared baseline cache — keyed by start_timestamp so identical episodes across
+    # models are only simulated once (baseline is deterministic given the same start date)
+    baseline_cache = {}
+
     total = len(args.result_dirs)
     for i, rdir in enumerate(args.result_dirs):
         print(f"\n[{i+1}/{total}] {rdir}")
@@ -151,6 +159,7 @@ def main():
                 val_start=args.val_start,
                 val_end=args.val_end,
                 n_episodes=args.n_episodes,
+                baseline_cache=baseline_cache,
             )
         except Exception as e:
             print(f"  ERROR: {e}")

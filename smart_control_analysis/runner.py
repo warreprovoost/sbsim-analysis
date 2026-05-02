@@ -119,7 +119,7 @@ def run_rl_setup(
 ) -> Dict[str, Any]:
     os.makedirs(output_dir, exist_ok=True)
     algo = algo.lower()
-    if algo not in {"sac", "td3", "ddpg", "tqc", "ppo", "crossq"}:
+    if algo not in {"sac", "td3", "ddpg", "tqc", "ppo", "crossq", "tqc_crossq"}:
         raise ValueError(f"Unsupported algo: {algo}")
 
     if eval_training_mode is None:

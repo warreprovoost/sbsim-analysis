@@ -138,7 +138,7 @@ def parse_args():
     )
     parser.add_argument(
         "--algo",
-        choices=["sac", "td3", "tqc", "ppo", "ddpg", "crossq"],
+        choices=["sac", "td3", "tqc", "ppo", "ddpg", "crossq", "tqc_crossq"],
         default="sac",
         help="RL algorithm.",
     )

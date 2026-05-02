@@ -1,0 +1,40 @@
+from typing import Optional
+import torch as th
+
+
+def quantile_huber_loss(
+    current_quantiles: th.Tensor,
+    target_quantiles: th.Tensor,
+    cum_prob: Optional[th.Tensor] = None,
+    sum_over_quantiles: bool = True,
+) -> th.Tensor:
+    if current_quantiles.ndim != target_quantiles.ndim:
+        raise ValueError(
+            f"Error: The dimension of curremt_quantile ({current_quantiles.ndim}) needs to match "
+            f"the dimension of target_quantiles ({target_quantiles.ndim})."
+        )
+    if current_quantiles.shape[0] != target_quantiles.shape[0]:
+        raise ValueError(
+            f"Error: The batch size of curremt_quantile ({current_quantiles.shape[0]}) needs to match "
+            f"the batch size of target_quantiles ({target_quantiles.shape[0]})."
+        )
+    if current_quantiles.ndim not in (2, 3):
+        raise ValueError(f"Error: The dimension of current_quantiles ({current_quantiles.ndim}) needs to be either 2 or 3.")
+
+    if cum_prob is None:
+        n_quantiles = current_quantiles.shape[-1]
+        cum_prob = (th.arange(n_quantiles, device=current_quantiles.device, dtype=th.float) + 0.5) / n_quantiles
+        if current_quantiles.ndim == 2:
+            cum_prob = cum_prob.view(1, -1, 1)
+        elif current_quantiles.ndim == 3:
+            cum_prob = cum_prob.view(1, 1, -1, 1)
+
+    pairwise_delta = target_quantiles.unsqueeze(-2) - current_quantiles.unsqueeze(-1)
+    abs_pairwise_delta = th.abs(pairwise_delta)
+    huber_loss = th.where(abs_pairwise_delta > 1, abs_pairwise_delta - 0.5, pairwise_delta**2 * 0.5)
+    loss = th.abs(cum_prob - (pairwise_delta.detach() < 0).float()) * huber_loss
+    if sum_over_quantiles:
+        loss = loss.sum(dim=-2).mean()
+    else:
+        loss = loss.mean()
+    return loss

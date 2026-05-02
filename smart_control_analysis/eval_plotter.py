@@ -272,6 +272,7 @@ def _compare_period_rl_vs_baseline(
     save_traces: bool = False,
     baseline_night_off: bool = False,
     algo_label: str = "RL",
+    baseline_cache: Optional[Dict[str, Any]] = None,
 ) -> Tuple[pd.DataFrame, Dict[str, float]]:
     rng = np.random.default_rng(seed)
     rows = []
@@ -320,22 +321,31 @@ def _compare_period_rl_vs_baseline(
         )
         env_rl.close()
 
-        # Baseline episode (same start, same seed)
-        env_b = trainer.create_env(params=p, training_mode=training_mode)
-        baseline = ThermostatBaselineController(
-            comfort_band_k=env_b.comfort_band_k,
-            working_hours=env_b.working_hours,
-            night_setback_k=getattr(env_b, "night_setback_k", 0.0),
-            night_off=baseline_night_off,
-        )
-        b_df, b_m, _ = _run_episode_trace(
-            env_b,
-            lambda obs, env: baseline.get_action(obs, env),
-            "baseline",
-            seed=ep,
-            action_design=_action_design,
-        )
-        env_b.close()
+        # Baseline episode — use cache if available to avoid re-simulating identical episodes
+        ts_key = p["start_timestamp"]
+        if baseline_cache is not None and ts_key in baseline_cache:
+            b_m = baseline_cache[ts_key]["metrics"]
+            b_df = baseline_cache[ts_key]["df"]
+            b_pct_outside = baseline_cache[ts_key]["pct_outside"]
+            b_max_dev = baseline_cache[ts_key]["max_dev"]
+            _skip_baseline_stats = True
+        else:
+            env_b = trainer.create_env(params=p, training_mode=training_mode)
+            baseline = ThermostatBaselineController(
+                comfort_band_k=env_b.comfort_band_k,
+                working_hours=env_b.working_hours,
+                night_setback_k=getattr(env_b, "night_setback_k", 0.0),
+                night_off=baseline_night_off,
+            )
+            b_df, b_m, _ = _run_episode_trace(
+                env_b,
+                lambda obs, env: baseline.get_action(obs, env),
+                "baseline",
+                seed=ep,
+                action_design=_action_design,
+            )
+            env_b.close()
+            _skip_baseline_stats = False
 
         if save_traces:
             rl_df.to_csv(os.path.join(period_dir, f"episode_{ep:02d}_rl_trace.csv"), index=False)
@@ -395,7 +405,15 @@ def _compare_period_rl_vs_baseline(
             return pct_outside, max_dev
 
         rl_pct_outside, rl_max_dev = _comfort_stats(rl_df)
-        b_pct_outside, b_max_dev = _comfort_stats(b_df)
+        if not _skip_baseline_stats:
+            b_pct_outside, b_max_dev = _comfort_stats(b_df)
+            if baseline_cache is not None:
+                baseline_cache[ts_key] = {
+                    "metrics": b_m,
+                    "df": b_df,
+                    "pct_outside": b_pct_outside,
+                    "max_dev": b_max_dev,
+                }
 
         row = {
             "episode": ep,
@@ -480,6 +498,7 @@ def compare_rl_vs_baseline(
     test_period_start="2023-12-01",
     test_period_end="2024-03-24",
     baseline_night_off: bool = False,
+    baseline_cache: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Compare trained RL policy vs thermostat baseline on winter val/test splits.
@@ -509,6 +528,7 @@ def compare_rl_vs_baseline(
         save_traces=save_traces,
         baseline_night_off=baseline_night_off,
         algo_label=algo_label,
+        baseline_cache=baseline_cache,
     )
     test_df, test_summary = _compare_period_rl_vs_baseline(
         trainer=trainer,
@@ -527,6 +547,7 @@ def compare_rl_vs_baseline(
         save_traces=save_traces,
         baseline_night_off=baseline_night_off,
         algo_label=algo_label,
+        baseline_cache=baseline_cache,
     )
 
     # Training curve plot

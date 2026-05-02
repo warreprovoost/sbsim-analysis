@@ -36,6 +36,21 @@ METRICS = [
     ("rl_max_temp_deviation_c", "Max deviation (°C)"),
 ]
 
+NORM_METRICS = [
+    ("cost_ratio",    "Energy cost ratio (RL / Baseline)"),
+    ("dis_ratio",     "Discomfort ratio (RL / Baseline)"),
+]
+
+
+def _add_normalized_metrics(df: pd.DataFrame) -> pd.DataFrame:
+    """Add per-episode rl/baseline ratio columns."""
+    df = df.copy()
+    if "baseline_energy_cost_usd" in df.columns:
+        df["cost_ratio"] = df["rl_energy_cost_usd"] / df["baseline_energy_cost_usd"].replace(0, np.nan)
+    if "baseline_discomfort_deg_h" in df.columns:
+        df["dis_ratio"] = df["rl_discomfort_deg_h"] / df["baseline_discomfort_deg_h"].replace(0, np.nan)
+    return df
+
 
 def _make_label(config: dict) -> str:
     algo = config.get("algo", "?").upper()
@@ -71,6 +86,7 @@ def _load_models(result_dirs, labels, period, compare_subdir):
             continue
 
         label = labels[i] if labels and i < len(labels) else _make_label(config)
+        df = _add_normalized_metrics(df)
         models.append({"label": label, "config": config, "df": df, "dir": rdir})
         print(f"  Loaded: {label} ({len(df)} episodes) from {rdir}")
     return models
@@ -355,8 +371,8 @@ def _grouped_comparison(models, output_dir, period):
                       for col, _ in METRICS if col in members[0]["df"].columns}
         groups[g] = {"members": members, "pooled": pooled, "seed_means": seed_means}
 
-    _plot_grouped_boxplots(groups, group_names, color_map, output_dir, period)
-    _plot_grouped_cost_vs_comfort(groups, group_names, color_map, output_dir, period)
+    _plot_grouped_normalized_boxplots(groups, group_names, color_map, output_dir, period)
+    _plot_grouped_normalized_scatter(groups, group_names, color_map, output_dir, period)
     _print_grouped_summary(groups, group_names, color_map, output_dir, period)
 
 
@@ -401,6 +417,94 @@ def _plot_grouped_boxplots(groups, group_names, color_map, output_dir, period):
     axes[0].legend(fontsize=8)
     plt.tight_layout()
     path = os.path.join(output_dir, f"{period}_grouped_boxplots.png")
+    plt.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved: {path}")
+
+
+def _plot_grouped_normalized_boxplots(groups, group_names, color_map, output_dir, period):
+    available = [(col, lbl) for col, lbl in NORM_METRICS
+                 if all(col in groups[g]["pooled"].columns for g in group_names)]
+    if not available:
+        return
+
+    fig, axes = plt.subplots(1, len(available), figsize=(5 * len(available), 6))
+    if len(available) == 1:
+        axes = [axes]
+    fig.suptitle(f"{' vs '.join(group_names)} — Normalised by Baseline (lower is better)"
+                 f" — {period.capitalize()} split", fontsize=13, fontweight="bold")
+
+    for ax, (col, ylabel) in zip(axes, available):
+        data = [groups[g]["pooled"][col].dropna().to_numpy() for g in group_names]
+        bp = ax.boxplot(data, labels=group_names, patch_artist=True, widths=0.6)
+        for j, (box, g) in enumerate(zip(bp["boxes"], group_names)):
+            box.set_facecolor(color_map[g])
+            box.set_alpha(0.7)
+
+        # Seed mean diamonds
+        for j, g in enumerate(group_names):
+            members = groups[g]["members"]
+            seed_vals = [m["df"][col].mean() for m in members if col in m["df"].columns]
+            ax.scatter([j + 1] * len(seed_vals), seed_vals,
+                       color="black", zorder=5, s=40, marker="D",
+                       label="Seed mean" if j == 0 else "")
+
+        ax.axhline(1.0, color="gray", linewidth=1.0, linestyle="--", label="Baseline (=1)")
+        ax.set_ylabel(ylabel)
+        ax.grid(axis="y", alpha=0.3)
+
+        # Mann-Whitney between all pairs
+        if len(group_names) >= 2:
+            for i in range(len(group_names)):
+                for j in range(i + 1, len(group_names)):
+                    g0, g1 = group_names[i], group_names[j]
+                    d0 = groups[g0]["pooled"][col].dropna()
+                    d1 = groups[g1]["pooled"][col].dropna()
+                    _, pval = stats.mannwhitneyu(d0, d1, alternative="two-sided")
+                    sig = "***" if pval < 0.001 else "**" if pval < 0.01 else "*" if pval < 0.05 else "ns"
+                    print(f"  {g0} vs {g1} | {ylabel}: p={pval:.4f} {sig}")
+
+    axes[0].legend(fontsize=8)
+    plt.tight_layout()
+    path = os.path.join(output_dir, f"{period}_grouped_normalized_boxplots.png")
+    plt.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved: {path}")
+
+
+def _plot_grouped_normalized_scatter(groups, group_names, color_map, output_dir, period):
+    if not all("cost_ratio" in groups[g]["pooled"].columns and
+               "dis_ratio" in groups[g]["pooled"].columns for g in group_names):
+        return
+    fig, ax = plt.subplots(figsize=(8, 6))
+    ax.set_title(f"{' vs '.join(group_names)} — Normalised Cost vs Discomfort"
+                 f" — {period.capitalize()} split  (lower is better)",
+                 fontsize=13, fontweight="bold")
+
+    for g in group_names:
+        members = groups[g]["members"]
+        cost_means = [m["df"]["cost_ratio"].mean() for m in members]
+        dis_means  = [m["df"]["dis_ratio"].mean()  for m in members]
+        ax.scatter(cost_means, dis_means, color=color_map[g],
+                   s=60, alpha=0.6, zorder=5, marker="o",
+                   edgecolors="white", linewidths=0.5)
+        ax.errorbar(np.mean(cost_means), np.mean(dis_means),
+                    xerr=np.std(cost_means), yerr=np.std(dis_means),
+                    fmt="o", color=color_map[g], markersize=10,
+                    capsize=5, capthick=1.5, linewidth=1.5,
+                    markeredgecolor="black", markeredgewidth=0.8,
+                    label=g, zorder=6)
+
+    ax.plot(1.0, 1.0, "kX", markersize=14, markeredgewidth=2,
+            label="Baseline (1, 1)", zorder=7)
+    ax.axhline(1.0, color="gray", linewidth=0.8, linestyle="--", alpha=0.5)
+    ax.axvline(1.0, color="gray", linewidth=0.8, linestyle="--", alpha=0.5)
+    ax.set_xlabel("Energy cost ratio (RL / Baseline)")
+    ax.set_ylabel("Discomfort ratio (RL / Baseline)")
+    ax.legend(fontsize=9, framealpha=0.9)
+    ax.grid(alpha=0.3)
+    plt.tight_layout()
+    path = os.path.join(output_dir, f"{period}_grouped_normalized_scatter.png")
     plt.savefig(path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"  Saved: {path}")
@@ -459,23 +563,17 @@ def _print_grouped_summary(groups, group_names, color_map, output_dir, period):
         n_seeds = len(members)
         n_eps   = len(pooled)
 
-        bl_cost = pooled["baseline_energy_cost_usd"].mean()
-        rl_cost_mean = np.mean([m["df"]["rl_energy_cost_usd"].mean() for m in members])
-        rl_cost_std  = np.std( [m["df"]["rl_energy_cost_usd"].mean() for m in members])
-        bl_dis  = pooled["baseline_discomfort_deg_h"].mean()
-        rl_dis_mean  = np.mean([m["df"]["rl_discomfort_deg_h"].mean() for m in members])
-        rl_dis_std   = np.std( [m["df"]["rl_discomfort_deg_h"].mean() for m in members])
+        cost_ratio_mean = np.mean([m["df"]["cost_ratio"].mean() for m in members]) if "cost_ratio" in members[0]["df"].columns else float("nan")
+        cost_ratio_std  = np.std( [m["df"]["cost_ratio"].mean() for m in members]) if "cost_ratio" in members[0]["df"].columns else float("nan")
+        dis_ratio_mean  = np.mean([m["df"]["dis_ratio"].mean()  for m in members]) if "dis_ratio"  in members[0]["df"].columns else float("nan")
+        dis_ratio_std   = np.std( [m["df"]["dis_ratio"].mean()  for m in members]) if "dis_ratio"  in members[0]["df"].columns else float("nan")
 
         row = {
-            "Group":          g,
-            "Seeds":          n_seeds,
-            "Episodes":       n_eps,
-            "RL Cost (USD)":  f"{rl_cost_mean:.3f} ± {rl_cost_std:.3f}",
-            "BL Cost (USD)":  f"{bl_cost:.3f}",
-            "Cost Δ (%)":     f"{(bl_cost - rl_cost_mean) / bl_cost * 100:.1f}" if bl_cost > 0 else "N/A",
-            "RL Dis (°C·h)":  f"{rl_dis_mean:.2f} ± {rl_dis_std:.2f}",
-            "BL Dis (°C·h)":  f"{bl_dis:.2f}",
-            "Comfort Δ (%)":  f"{(bl_dis - rl_dis_mean) / bl_dis * 100:.1f}" if bl_dis > 0 else "N/A",
+            "Group":             g,
+            "Seeds":             n_seeds,
+            "Episodes":          n_eps,
+            "Cost ratio (↓)":    f"{cost_ratio_mean:.3f} ± {cost_ratio_std:.3f}",
+            "Discomfort ratio (↓)": f"{dis_ratio_mean:.3f} ± {dis_ratio_std:.3f}",
         }
         rows.append(row)
 
@@ -483,23 +581,34 @@ def _print_grouped_summary(groups, group_names, color_map, output_dir, period):
     print(summary_df.to_string(index=False))
 
     # Statistical tests between each pair of groups
+    stat_lines = []
     if len(group_names) >= 2:
-        print(f"\n  Mann-Whitney U tests (two-sided):")
+        stat_lines.append("Mann-Whitney U tests (two-sided):")
         for i in range(len(group_names)):
             for j in range(i + 1, len(group_names)):
                 g0, g1 = group_names[i], group_names[j]
-                for col, lbl in METRICS:
+                for col, lbl in NORM_METRICS:
                     if col not in groups[g0]["pooled"].columns:
                         continue
                     d0 = groups[g0]["pooled"][col].dropna()
                     d1 = groups[g1]["pooled"][col].dropna()
                     stat, pval = stats.mannwhitneyu(d0, d1, alternative="two-sided")
                     sig = "***" if pval < 0.001 else "**" if pval < 0.01 else "*" if pval < 0.05 else "ns"
-                    print(f"    {g0} vs {g1} | {lbl:<30} p={pval:.4f} {sig}")
+                    line = f"  {g0} vs {g1} | {lbl:<40} p={pval:.4f} {sig}"
+                    stat_lines.append(line)
+                    print(line)
 
     path = os.path.join(output_dir, f"{period}_grouped_summary.csv")
     summary_df.to_csv(path, index=False)
+
+    txt_path = os.path.join(output_dir, f"{period}_grouped_summary.txt")
+    with open(txt_path, "w") as f:
+        f.write(f"GROUPED SUMMARY — {period.upper()} period\n")
+        f.write("=" * 90 + "\n")
+        f.write(summary_df.to_string(index=False) + "\n\n")
+        f.write("\n".join(stat_lines) + "\n")
     print(f"\n  Saved: {path}")
+    print(f"  Saved: {txt_path}")
 
 
 if __name__ == "__main__":

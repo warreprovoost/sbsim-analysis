@@ -218,7 +218,7 @@ def _compute_convergence(result_dir: str, wandb_project: str, run_id: str,
 # ── plotting ──────────────────────────────────────────────────────────────────
 
 def _plot_convergence(all_runs: list[dict], group_names: list[str],
-                      color_map: dict, output_dir: str):
+                      color_map: dict, output_dir: str, x_min: int = None):
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
     fig.suptitle(f"{' vs '.join(group_names)} — Convergence (RL / Baseline, lower is better)",
                  fontsize=13, fontweight="bold")
@@ -240,6 +240,8 @@ def _plot_convergence(all_runs: list[dict], group_names: list[str],
             if not members:
                 continue
             all_steps = sorted(set().union(*[set(r["df"]["step"]) for r in members]))
+            if x_min is not None:
+                all_steps = [s for s in all_steps if s >= x_min]
             interp_vals = []
             for r in members:
                 s = r["df"].set_index("step")[col]
@@ -253,6 +255,8 @@ def _plot_convergence(all_runs: list[dict], group_names: list[str],
             ax.plot(all_steps, median, color=color, linewidth=2.0, label=g, zorder=3)
             ax.fill_between(all_steps, lo, hi, color=color, alpha=0.2)
 
+        if x_min is not None:
+            ax.set_xlim(left=x_min)
         if symlog:
             # Linear between 0 and 1 (where differences matter), log above 1
             ax.set_yscale("symlog", linthresh=1.0, linscale=1.0)
@@ -286,6 +290,8 @@ def main():
     parser.add_argument("--output_dir", default=None)
     parser.add_argument("--plot_only", action="store_true",
                         help="Skip W&B fetch and baseline simulation; replot from existing cache")
+    parser.add_argument("--x_min", type=int, default=None,
+                        help="Minimum training step to show on x-axis (e.g. 100000 to skip early chaos)")
     args = parser.parse_args()
 
     import datetime
@@ -368,7 +374,7 @@ def main():
         _save_baseline_cache(baseline_cache)
         print(f"  Saved {len(baseline_cache)} baseline cache entries to {BASELINE_CACHE_PATH}")
 
-    _plot_convergence(all_runs, group_names, color_map, output_dir)
+    _plot_convergence(all_runs, group_names, color_map, output_dir, x_min=args.x_min)
     print(f"\nDone. Output: {output_dir}")
 
 

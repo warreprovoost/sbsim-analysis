@@ -10,6 +10,7 @@ from stable_baselines3 import PPO
 from stable_baselines3 import SAC
 from stable_baselines3 import TD3
 from sb3_contrib import CrossQ, TQC
+from tqc_crossq import TQCCrossQ
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv, VecNormalize
@@ -263,8 +264,8 @@ class BuildingRLTrainer:
 
         self.algo_name = algo.lower()
         self.seed = seed
-        if self.algo_name not in ["sac", "td3", "ddpg", "tqc", "ppo", "crossq"]:
-            raise ValueError(f"Unsupported algorithm: {algo}. Choose 'sac', 'td3', 'tqc', 'ddpg', 'ppo', or 'crossq'.")
+        if self.algo_name not in ["sac", "td3", "ddpg", "tqc", "ppo", "crossq", "tqc_crossq"]:
+            raise ValueError(f"Unsupported algorithm: {algo}. Choose 'sac', 'td3', 'tqc', 'ddpg', 'ppo', 'crossq', or 'tqc_crossq'.")
 
         external_wandb_run = algo_kwargs.pop("wandb_run", None)
         if external_wandb_run is not None:
@@ -311,6 +312,12 @@ class BuildingRLTrainer:
             common_params.setdefault("learning_starts", 5000)
             algo_kwargs.pop("policy_kwargs", None)  # use CrossQ default: pi=[256,256], qf=[1024,1024]
             AlgoClass = CrossQ
+        elif self.algo_name == "tqc_crossq":
+            common_params["buffer_size"] = buffer_size
+            common_params["batch_size"] = batch_size
+            common_params.setdefault("learning_starts", 5000)
+            algo_kwargs.pop("policy_kwargs", None)  # use TQCCrossQ default: pi=[256,256], qf=[1024,1024]
+            AlgoClass = TQCCrossQ
         elif self.algo_name == "ppo":
             # PPO is on-policy: no replay buffer; explores via stochastic Gaussian policy
             common_params.setdefault("n_steps", 1024)   # ~1 episode (7d × 24h × 6 steps/h = 1008 steps)
@@ -606,6 +613,8 @@ class BuildingRLTrainer:
             self.model = PPO.load(filepath, device=device)
         elif algo == "crossq":
             self.model = CrossQ.load(filepath, device=device)
+        elif algo == "tqc_crossq":
+            self.model = TQCCrossQ.load(filepath, device=device)
         else:
             raise ValueError(f"Unknown algo: {algo}")
         self.algo_name = algo
