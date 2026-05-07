@@ -51,11 +51,8 @@ PRESETS = {
         n_eval_episodes=30,
         training_mode="full",
         eval_training_mode="full",
-        policy_kwargs={"net_arch": [256, 256, 256]},
-        # Curriculum: learn comfort first, ramp energy, then converge at fixed weight
-        # 0-40%: comfort only (ew=1), 40-80%: ramp 1→15, 80-100%: constant 15
-        #curriculum=[(0.3, 1.0), (0.7, 12.5), (1.0, 12.5)],
-        description="Full training with energy penalty — 500k steps, 7-day episodes, 10min timestep",
+        policy_kwargs={"net_arch": [1024, 1024]},
+        description="",
     ),
 
     "long_eval1": dict(
@@ -241,10 +238,17 @@ def main():
 
     if args.output_dir is None:
         ew_str = f"_ew{str(args.energy_weight).replace('.', '')}"
-        base_dir = f"{args.mode}_{args.algo}_seed{args.seed}{ew_str}"
+        total_ts = args.total_timesteps or preset["total_timesteps"]
+        if total_ts >= 1_000_000:
+            ts_str = f"{total_ts // 1_000_000}M"
+        elif total_ts >= 1_000:
+            ts_str = f"{total_ts // 1_000}k"
+        else:
+            ts_str = str(total_ts)
+        base_dir = f"{args.algo}_seed{args.seed}{ew_str}_{ts_str}"
         if args.unique_run:
-            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-            base_dir = f"{base_dir}_{ts}"
+            ms = datetime.datetime.now().strftime("%f")
+            base_dir = f"{base_dir}_{ms}"
         output_dir = os.path.join(THESIS_ROOT, "results", base_dir)
     else:
         output_dir = os.path.expanduser(args.output_dir)

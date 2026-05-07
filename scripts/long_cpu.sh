@@ -2,7 +2,7 @@
 #SBATCH --job-name=rl_long_new
 #SBATCH --time=12:30:00
 #SBATCH --mem=8G
-#SBATCH --cpus-per-task=2
+#SBATCH --cpus-per-task=4
 #SBATCH --output=/user/gent/453/vsc45342/thesis/logs/long.o%j
 #SBATCH --error=/user/gent/453/vsc45342/thesis/logs/long.e%j
 #SBATCH --mail-type=BEGIN,END,FAIL

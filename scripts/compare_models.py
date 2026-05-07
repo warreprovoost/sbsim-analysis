@@ -452,6 +452,9 @@ def _plot_grouped_normalized_boxplots(groups, group_names, color_map, output_dir
         ax.axhline(1.0, color="gray", linewidth=1.0, linestyle="--", label="Baseline (=1)")
         ax.set_ylabel(ylabel)
         ax.grid(axis="y", alpha=0.3)
+        all_vals = np.concatenate([groups[g]["pooled"][col].dropna().to_numpy() for g in group_names])
+        pad = (all_vals.max() - all_vals.min()) * 0.1 or 0.05
+        ax.set_ylim(all_vals.min() - pad, all_vals.max() + pad)
 
         # Mann-Whitney between all pairs
         if len(group_names) >= 2:
