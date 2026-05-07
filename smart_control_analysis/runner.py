@@ -128,7 +128,7 @@ def run_rl_setup(
     base = get_base_params().copy()
     base["weather_source"] = "replay"
     base["weather_csv_path"] = weather_csv_path
-    base["time_zone"] = "America/Los_Angeles"
+    base["time_zone"] = "Europe/Brussels"
     base["time_step_sec"] = int(base.get("time_step_sec", 300))
     base["floorplan"] = floorplan
     base["energy_weight"] = energy_weight
