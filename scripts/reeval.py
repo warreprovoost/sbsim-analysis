@@ -56,7 +56,7 @@ def main():
     base = get_base_params().copy()
     base["weather_source"] = "replay"
     base["weather_csv_path"] = run_config["weather_csv"]
-    base["time_zone"] = "America/Los_Angeles"
+    base["time_zone"] = "Europe/Brussels"
     base["time_step_sec"] = int(base.get("time_step_sec", 300))
     base["floorplan"] = run_config.get("floorplan", "single_room")
     base["energy_weight"] = run_config.get("energy_weight", 2.0)

@@ -34,7 +34,7 @@ def building_factory(
     """
     import numpy as np
 
-    sim_tz = params.get("time_zone", "America/Los_Angeles")
+    sim_tz = params.get("time_zone", "Europe/Brussels")
     start_ts = pd.Timestamp(params.get("start_timestamp", "2023-01-15 06:00:00"))
     if start_ts.tzinfo is None:
         start_ts = start_ts.tz_localize(sim_tz)

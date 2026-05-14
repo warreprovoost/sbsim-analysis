@@ -82,7 +82,7 @@ def make_env(args):
     base_params["weather_source"] = "replay"
     base_params["weather_csv_path"] = args.weather_csv
     base_params["floorplan"] = args.floorplan
-    base_params["time_zone"] = "America/Los_Angeles"
+    base_params["time_zone"] = "Europe/Brussels"
     base_params["energy_weight"] = 1.0
     base_params["action_design"] = "reheat_per_zone"
     base_params["max_steps"] = int(7 * 24 * 3600 / base_params["time_step_sec"])

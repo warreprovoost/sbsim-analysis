@@ -59,7 +59,7 @@ class BuildingGymEnv(gym.Env):
     def __init__(
         self,
         sim: Any,
-        time_zone: str = "America/Los_Angeles",
+        time_zone: str = "Europe/Brussels",
         seed: Optional[int] = None,
         max_steps: Optional[int] = None,
         comfort_band_k: Tuple[float, float] = (294.15, 295.15),  # 21C to 22C
